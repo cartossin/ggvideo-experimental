@@ -1,4 +1,13 @@
-# Goodgallery
+# ggvideo-experimental
+
+> **Experimental fork of [Goodgallery](https://github.com/cartossin/goodgallery)
+> that adds video.** It has had **no security review**. In particular it runs
+> ffmpeg on every video in the galleries, including uploaded ones, and
+> ffmpeg's demuxers and decoders are a large attack surface. Do not expose it
+> to untrusted users or untrusted files. Use upstream Goodgallery for a
+> photo gallery you put on the internet.
+
+## Goodgallery
 
 A web-based photo gallery solution focusing on ui and performance. One Node.js process, no npm
 dependencies, libvips for image work, a WebGL grid on the client. Built and

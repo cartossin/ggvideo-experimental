@@ -1,13 +1,13 @@
 [Unit]
-Description=Goodgallery
+Description=ggvideo-experimental (Goodgallery fork with video; not security reviewed)
 After=network.target
 
 [Service]
 Type=simple
-User=goodgallery
-Group=goodgallery
-WorkingDirectory=/opt/goodgallery
-ExecStart=/usr/bin/node /opt/goodgallery/server.js
+User=ggvideo
+Group=ggvideo
+WorkingDirectory=/opt/ggvideo
+ExecStart=/usr/bin/node /opt/ggvideo/server.js
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
@@ -18,9 +18,9 @@ RestartSec=2
 # line; see "Configuration" in the README. `node server.js login-link` reads
 # the same file, so the link it makes matches the service. The leading "-"
 # makes the file optional: without it the defaults apply (port 3000, state
-# in /var/lib/goodgallery, galleries in /var/lib/goodgallery/galleries).
-EnvironmentFile=-/etc/goodgallery.env
-# File and folder names are UTF-8. The server runs its vips tools under C.UTF-8
+# in /var/lib/ggvideo, galleries in /var/lib/ggvideo/galleries).
+EnvironmentFile=-/etc/ggvideo.env
+# File and folder names are UTF-8. The server runs its vips and ffmpeg tools under C.UTF-8
 # itself; this keeps every other child process and log line consistent.
 Environment=LANG=C.UTF-8
 
