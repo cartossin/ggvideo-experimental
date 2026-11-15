@@ -1,4 +1,5 @@
-// Goodgallery 2.0 — Node.js. Zero runtime npm deps. libvips for image work.
+// ggvideo-experimental: Goodgallery 2.0 with video. Zero runtime npm deps.
+// libvips for image work, ffmpeg for video work.
 //
 // On-disk layout:
 //   GALLERIES_ROOT/<path...>/<image>                    originals
@@ -37,6 +38,8 @@ async function startServer() {
   config.prepareDataDirectories();
   const { preflightVips, stopVipsProcesses } = await import('./lib/vips.js');
   preflightVips();
+  const { preflightFfmpeg, stopFfmpegProcesses } = await import('./lib/ffmpeg.js');
+  preflightFfmpeg();
   const { stopAtlasWorker } = await import('./lib/atlas.js');
   const { getPasskey, sessions } = await import('./lib/auth.js');
   const { brokenTilesReady } = await import('./lib/build.js');
@@ -73,8 +76,9 @@ async function startServer() {
   // the unit's cgroup is killed anyway; a server run by hand has no such net.
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.once(signal, async () => {
-      console.log(`[shutdown] ${signal}: stopping image builds`);
+      console.log(`[shutdown] ${signal}: stopping image and video builds`);
       stopVipsProcesses();
+      stopFfmpegProcesses();
       await stopAtlasWorker();
       // End the way the signal would have, so systemd and shells see the
       // usual status for it.
@@ -93,7 +97,7 @@ function listenErrorText(error) {
 
 function printStartupLines(config, noAdminYet) {
   const addresses = config.addressesToOpen();
-  console.log(`Goodgallery ${config.VERSION} listening on ${config.HOST} port ${config.PORT}`);
+  console.log(`ggvideo-experimental ${config.VERSION} listening on ${config.HOST} port ${config.PORT}`);
   if (addresses.fromElsewhere) console.log(`  open:           ${addresses.fromElsewhere} (or the address your proxy serves)`);
   if (addresses.onThisMachine) console.log(`  on this machine: ${addresses.onThisMachine}`);
   console.log(`  galleries root: ${config.GALLERIES_ROOT}`);

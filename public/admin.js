@@ -997,11 +997,19 @@ function uploadsAreOnScreen(uploads) {
 // targetSegments: the folder the upload was started in. problems: sentences
 // about what was left out before this point (folders the server refused),
 // shown in the same notice as skipped non-images.
+// Videos go by extension, the list the server takes (lib/config.js): many
+// containers (.mts, .ts, .vob, .mkv) have no MIME type in the browser, or
+// one that is not video/*.
+const VIDEO_EXTENSION = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|mpg|mpeg|ts|m2ts|mts|3gp|ogv|asf|divx|vob)$/i;
+function isPhotoOrVideo(file) {
+  return (file.type && file.type.startsWith('image/')) || VIDEO_EXTENSION.test(file.name);
+}
+
 async function uploadItems(targetSegments, items, problems = []) {
-  const images = items.filter(({ file }) => file.type && file.type.startsWith('image/'));
+  const images = items.filter(({ file }) => isPhotoOrVideo(file));
   const skipped = items.length - images.length;
   const notes = problems.slice();
-  if (skipped) notes.push('Skipped ' + plural(skipped, 'file') + ' that ' + (skipped === 1 ? 'is' : 'are') + ' not an image.');
+  if (skipped) notes.push('Skipped ' + plural(skipped, 'file') + ' that ' + (skipped === 1 ? 'is' : 'are') + ' not a photo or video.');
   if (notes.length) showNotice(notes.join(' '), true);
   const uploads = uploadsFor(targetSegments);
   uploads.total += images.length;
