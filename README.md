@@ -241,10 +241,12 @@ working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
 (one single-threaded vips), a preview clip job 3 (its decoder thread,
 its filter thread, and the per-tier encoders of tiny pictures, which
 together use about one core), a mosaic at least half the budget and all
-of it that is free when it starts (on 16 idle CPUs: 5 decoder lanes of a
-decoder thread and a compositing thread each, 4 x264 threads, the
-compositor), a web copy at most half the budget and 8 (one decoder, one
-filter thread, the rest x264). Each job is started with exactly those thread options, and a job
+of it that is free when it starts, split by its tile count between
+decoder lanes (a decoder thread and a compositing thread each, about one
+per 600 tiles) and x264 (at least a quarter): on 16 idle CPUs a full h25
+sheet gets 5 lanes and 5 encoder threads, an h200 sheet 1 lane and 13; a
+web copy at most half the budget and 8 (one decoder, one filter thread,
+the rest x264). Each job is started with exactly those thread options, and a job
 starts only when its units are free, so the working threads never
 outnumber the CPUs. Photos come first: while photos wait, no video job
 starts. Clips and mosaics go before web copies, and as a web copy takes at
