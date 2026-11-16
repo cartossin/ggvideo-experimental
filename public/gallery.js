@@ -426,8 +426,17 @@
     var tn = e.target && e.target.tagName;
     if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' ||
         (e.target && e.target.isContentEditable)) return;
-
     var k = e.which || e.keyCode;
+
+    // Space plays or pauses the open video. The player never has the keys
+    // (keepKeysOnPage), so the page does what its Space would.
+    if (k === 32 && focusedIdx > 0 && toggleMainVideoPlayback()) {
+      e.preventDefault();
+      return;
+    }
+    // In fullscreen the browser's Escape ends the fullscreen; the page
+    // does nothing else with keys there.
+    if (videoIsFullscreen()) return;
 
     // Grid view: route scroll keys to native browser handling by ensuring
     // #thumbs has focus. We don't preventDefault and we don't scroll ourselves —
@@ -3408,6 +3417,7 @@
         showMainVideoNote('This video cannot be played in this browser. Download the original to watch it.');
       }
     });
+    element.addEventListener('focus', keepKeysOnPage);
     // iOS plays fullscreen in its own player; the view is laid out again
     // when it closes, as it is after a page's fullscreen (startjs).
     element.addEventListener('webkitendfullscreen', scheduleRender);
@@ -3456,6 +3466,31 @@
     if (motionReduced()) return;
     var playing = element.play();
     if (playing && playing.catch) playing.catch(function () {});
+  }
+
+  // Chrome's player keeps every key its controls receive: once a click on
+  // them (play, the timeline) has focused one, no key reaches the page, so
+  // the arrows and Escape stopped working. Focus goes back to #thumbs, the
+  // page's key target, whenever the player takes it (the click itself
+  // still acts); keycheck does what the player's Space would. Not in
+  // fullscreen, where the player's own keys are the ones wanted.
+  function keepKeysOnPage() {
+    if (videoIsFullscreen()) return;
+    var thumbsEl = $('thumbs');
+    if (thumbsEl) thumbsEl.focus({ preventScroll: true });
+  }
+
+  // Space on the photo view of a playable video. False when there is none.
+  function toggleMainVideoPlayback() {
+    if (!mainVideo || !mainVideo.element.getAttribute('src')) return false;
+    var element = mainVideo.element;
+    if (element.paused) {
+      var playing = element.play();
+      if (playing && playing.catch) playing.catch(function () {});
+    } else {
+      element.pause();
+    }
+    return true;
   }
 
   function showMainVideoNote(text) {
