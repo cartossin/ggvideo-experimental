@@ -264,11 +264,12 @@ browsers need to play and seek video.
   than 2x minification), a hidden page, the photo view, a video not in the atlas
   yet, and a sheet that could not be loaded or decoded. The tiles move
   with `prefers-reduced-motion` too (it is often on for the system's own
-  animations); only an opened video then waits for a click. Every video
-  tile at least 60 px high (and 40 wide) has a small badge, a play
-  triangle (smaller tiles would be swamped by it); its duration is
-  added while the mouse is over the top controls' pull tab or the
-  controls are revealed (not on touch screens).
+  animations); only an opened video then waits for a click. While the
+  mouse is over the top controls' pull tab, or the controls are open
+  (on a touch screen: after a tap on the tab), every video tile at least
+  60 px high and 40 wide shows a small badge with a play triangle and
+  its duration (the triangle alone where the duration does not fit);
+  otherwise there is no badge at all.
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a

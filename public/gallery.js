@@ -2294,12 +2294,12 @@
   }
 
   // ---- video badges ----------------------------------------------------
-  // A quiet marker on each video tile big enough for one, so a poster
-  // reads as a video: a play triangle, white on translucent black, in the
-  // tile's bottom-left corner. The duration is added after it only while
-  // the top controls are revealed (body.controls-revealed, set by
-  // setupAutoHide), never on a touch screen, and only where it fits.
-  // Showing or hiding the durations is one full grid draw, which builds
+  // On request only, nothing otherwise: while the top controls are
+  // revealed or a mouse pointer is over their pull tab (setupAutoHide
+  // calls setShown), each video tile big enough for one gets a badge in
+  // its bottom-left corner, white on translucent black: a play triangle
+  // and the duration, or the triangle alone where the duration does not
+  // fit. Showing or hiding the badges is one full grid draw, which builds
   // every badge again (playing sheets included). Drawn on the GPU like the
   // tiles: one small glyph sheet (a 2D canvas holding the triangle, the
   // digits, ':' and a patch of the background) is a texture, and a badge
@@ -2314,7 +2314,7 @@
     // is then at most about a quarter of the tile's height and the 15 px
     // triangle badge under 40% of its width, a corner mark. On smaller
     // tiles (a big folder at #fit, ~28 px) it would cover much of the
-    // picture; those tiles mark themselves by moving, if anything.
+    // picture.
     var MIN_TILE_H = 60;
     var MIN_TILE_W = 40;
     var FONT_PX = 11;
@@ -2322,12 +2322,11 @@
     var CELL_SPACING = 3;    // transparent sheet px between glyphs, so filtering never mixes two
     var TEXTURE_KEY = 'video-badges';
     var glyphs = null;       // { scale, canvas, width, height, cells: { name: { x, w } } }, sheet px
-    var durationsShown = false;
+    var shown = false;
 
-    // Called when the top controls are revealed or hidden.
-    function setDurationsShown(shown) {
-      if (shown === durationsShown) return;
-      durationsShown = shown;
+    function setShown(show) {
+      if (show === shown) return;
+      shown = show;
       if (anyVideos() && canvasEl) scheduleGridRedraw();
     }
 
@@ -2395,12 +2394,12 @@
     }
 
     function pushBadge(values, t, dpr) {
-      var text = durationsShown ? durationText(window.videos[t.name].duration) : '';
+      if (t.h < MIN_TILE_H || t.w < MIN_TILE_W) return;
+      var text = durationText(window.videos[t.name].duration);
       var textW = 0;
       for (var i = 0; i < text.length; i++) textW += glyphs.cells[text[i]].w / glyphs.scale;
       var fullW = PAD + TRIANGLE_W + (text ? GAP + textW : 0) + PAD;
       var triangleOnlyW = PAD + TRIANGLE_W + PAD;
-      if (t.h < MIN_TILE_H || t.w < MIN_TILE_W) return;
       var badgeW = t.w >= fullW + 2 * INSET ? fullW : t.w >= triangleOnlyW + 2 * INSET ? triangleOnlyW : 0;
       if (!badgeW) return;
       // On whole device pixels, so the glyphs are not smeared across two.
@@ -2418,9 +2417,10 @@
       }
     }
 
-    // Instances of the badges of these tiles (the ones that are videos).
+    // Instances of the badges of these tiles (the ones that are videos);
+    // none while the badges are not shown.
     function instancesFor(tiles) {
-      if (!anyVideos() || !ensureTexture()) return new Float32Array(0);
+      if (!shown || !anyVideos() || !ensureTexture()) return new Float32Array(0);
       var dpr = devicePixelRatio();
       var values = [];
       for (var i = 0; i < tiles.length; i++) {
@@ -2442,7 +2442,7 @@
 
     // Every badge in the canvas buffer; the end of a full grid draw.
     function drawForBuffer() {
-      if (!anyVideos() || !canvasEl) return;
+      if (!shown || !anyVideos() || !canvasEl) return;
       var tiles = [];
       var bufferBottom = bufferTop + bufferH;
       for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
@@ -2454,7 +2454,7 @@
     }
 
     return { instancesFor: instancesFor, draw: draw, drawStatic: drawStatic, drawForBuffer: drawForBuffer,
-      setDurationsShown: setDurationsShown };
+      setShown: setShown };
   })();
 
   // ---- moving tiles (the video atlas) ----------------------------------
@@ -4225,17 +4225,18 @@
       var isTouchOnly = window.matchMedia('(hover: none)').matches;
       var isEmpty = !window.lastimagevalue;
 
-      // The video badges show their durations while the controls are
-      // revealed or a mouse pointer is over the pill (it is highlighted
-      // then); never on touch screens.
+      // The video badges show while the controls are revealed, or while a
+      // mouse pointer is over the pill (it is highlighted then). On a touch
+      // screen the controls open only when the pill is tapped, a deliberate
+      // request, so revealed counts there too; a finger never hovers.
       var mouseOverPill = false;
-      function updateVideoDurations() {
+      function updateVideoBadges() {
         var revealed = document.body.classList.contains('controls-revealed');
-        videoBadges.setDurationsShown(!isTouchOnly && (revealed || mouseOverPill));
+        videoBadges.setShown(revealed || mouseOverPill);
       }
       function show() {
         document.body.classList.add('controls-revealed');
-        updateVideoDurations();
+        updateVideoBadges();
       }
       function hide() {
         // Empty galleries: drawer is locked open. Pill is hidden via CSS so
@@ -4243,7 +4244,7 @@
         // hideControls() calls become no-ops.
         if (isEmpty) return;
         document.body.classList.remove('controls-revealed');
-        updateVideoDurations();
+        updateVideoBadges();
       }
       function toggle() {
         if (document.body.classList.contains('controls-revealed')) hide();
@@ -4272,12 +4273,12 @@
         pill.addEventListener('pointerenter', function (e) {
           if (e.pointerType !== 'mouse') return;
           mouseOverPill = true;
-          updateVideoDurations();
+          updateVideoBadges();
         });
         pill.addEventListener('pointerleave', function (e) {
           if (e.pointerType !== 'mouse') return;
           mouseOverPill = false;
-          updateVideoDurations();
+          updateVideoBadges();
         });
       }
 
