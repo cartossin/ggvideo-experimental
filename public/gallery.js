@@ -2469,12 +2469,17 @@
   //   movingTiles.forgetTextures() a new or restored GL context
   //   movingTiles.stats()          test hook
   var movingTiles = (function () {
-    // Below this tile height (device px) a video stays a poster: the
-    // smallest tier, h50, would be drawn at under half its size, without
-    // mipmaps (they cannot be made for every frame), so the motion would
-    // shimmer, and at the smallest zooms a whole folder is on screen at
-    // once, so every sheet would be decoding for tiles a few pixels tall.
-    var MIN_MOVING_TILE_DEVICE_H = 24;
+    // A tier is drawn at no less than 1/MAX_MINIFICATION of its size: a
+    // tile smaller than that (device px) stays a poster. The textures have
+    // no mipmaps, and a LINEAR filter reads a 2x2 texel footprint, so up
+    // to 2x smaller every texel still counts and the motion stays clean;
+    // further down texels are skipped and it shimmers. Mipmaps are not the
+    // answer: making them for every frame of a 4K sheet costs a pass per
+    // frame and a third more memory, and the low levels would average
+    // neighbouring tiles together (the 4 px skirt covers two levels at
+    // most). So the floor follows the smallest tier the atlas has: 25 px
+    // tiles move down to 12.5 device px, an h50-only atlas down to 25.
+    var MAX_MINIFICATION = 2;
     // At most this many sheets play at once (the ones with the most tiles
     // on screen), and at most MAX_LIVE_SHEETS are kept at all, paused ones
     // included: a decoder and a texture each, and a full 4K sheet's texture
@@ -2540,8 +2545,9 @@
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         var atlasIndex = atlasIndexByName.get(t.name);
-        if (atlasIndex === undefined || t.h * dpr < MIN_MOVING_TILE_DEVICE_H) continue;
+        if (atlasIndex === undefined) continue;
         var tierHeight = tierForTileHeight(t.h * dpr);
+        if (t.h * dpr < tierHeight / MAX_MINIFICATION) continue;
         var tier = atlas.tiers['h' + tierHeight];
         var rect = tier.tiles[atlasIndex];   // [sheetIndex, x, y, width, height]
         var sheet = rect && tier.sheets[rect[0]];

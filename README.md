@@ -255,8 +255,9 @@ browsers need to play and seek video.
   is kept, so a frame does not redraw the grid). The tier is chosen per
   tile from its height in device pixels, like the per-photo tiers. At most
   4 sheets play and 8 are kept; a sheet off screen pauses at once and is
-  freed after 15 s. Posters stay where nothing plays: tiles under 24
-  device pixels, a hidden page, the photo view, a video not in the atlas
+  freed after 15 s. Posters stay where nothing plays: tiles under half
+  the smallest tier's height in device pixels (no mipmaps, so no more
+  than 2x minification), a hidden page, the photo view, a video not in the atlas
   yet, and a sheet that could not be loaded or decoded. The tiles move
   with `prefers-reduced-motion` too (it is often on for the system's own
   animations); only an opened video then waits for a click. Every video
