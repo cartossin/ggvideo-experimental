@@ -203,18 +203,31 @@ What the server makes for each video, in this order:
    for videos with no viewer change, and the folder is browsable as soon as
    its stills are built.
 2. **Preview clips and the video atlas.** Each video's first
-   `VIDEO_PREVIEW_SECONDS` (60), without sound, at a constant
-   `VIDEO_PREVIEW_FPS` (24), scaled to each tier's tile height (`VIDEO_TIERS`:
-   50, 100 and 200 px; wider than 4:1 is shrunk to 4:1) are cached as small
-   clips in `gg/`. All of a folder's clips are then packed into mosaic
-   videos, one or more per tier (at most 3840x2160 and 30 fps, so hardware
-   decoding works everywhere; at most `VIDEO_SHEET_MAX_TILES` tiles each),
-   each exactly 60 s long so they all loop together; a shorter video loops
-   inside its tile. Each tile is surrounded by 4 px of its own edge pixels
-   so compression never mixes neighbours. A viewer plays one mosaic per
-   tier, uploads it to a WebGL texture each frame and cuts tiles out of it.
-   The layout is in `gg/video_<id>/_video.json`; its exact format is
-   documented at the top of `lib/video_atlas.js`.
+   `VIDEO_PREVIEW_SECONDS` (60), or its whole seconds when shorter, without
+   sound, at a constant `VIDEO_PREVIEW_FPS` (24), scaled to each tier's
+   tile height (`VIDEO_TIERS`: 25, 50, 100 and 200 px; wider than 4:1 is
+   shrunk to 4:1) are cached as small clips in `gg/`, with a keyframe at
+   every second. All of a folder's clips are then packed into mosaic
+   videos, one or more per tier, each exactly 60 s long so they all loop
+   together; a shorter video loops inside its tile. A mosaic is limited
+   only by its 3840x2160 frame (hardware decoding works everywhere up to
+   that, at 30 fps): about 4,600 h25 tiles of 16:9 video, 1,480 h50, 400
+   h100 or 104 h200, so 10,000 videos fill 3 h25 sheets. Each tile is
+   surrounded by 4 px of its own edge pixels so compression never mixes
+   neighbours. A viewer plays one mosaic per tier, uploads it to a WebGL
+   texture each frame and cuts tiles out of it. The layout is in
+   `gg/video_<id>/_video.json`; its exact format is documented at the top
+   of `lib/video_atlas.js`.
+
+   Mosaics are composed the way still atlases are: worker threads copy
+   each tile's decoded pixels into frames of the sheet's size, and one
+   ffmpeg encodes the finished frames, which it reads raw from a pipe. The
+   tiles' clips are read a second at a time by a few single-threaded
+   decoders, each going through its share of the clips one after the
+   other, so a sheet of 4,600 tiles costs a handful of processes, not one
+   decoder per tile. Its memory is two chunks of frames
+   (`VIDEO_MOSAIC_MEMORY`, 512 MiB, at least a second each: about 600 MB
+   at 4K) plus x264's (about 1 to 1.5 GB at 4K).
 3. **Web copy.** `gg/<name>.web.mp4`: H.264 High, yuv420p, AAC stereo (or no
    sound if the video has none), the index at the front of the file
    (faststart), at most `VIDEO_WEB_MAX_HEIGHT` (1080) lines on the short
@@ -223,14 +236,45 @@ What the server makes for each video, in this order:
    sound is converted if it is not AAC stereo).
 
 Steps 2 and 3 run after the folder's build is committed, in a queue of
-their own (`VIDEO_BUILD_CONCURRENCY` ffmpeg processes at once, at nice 10).
-Clips and mosaics go before web copies, and web copies never take the last
-free lane, so a new folder's previews do not wait behind hours of web
-copies elsewhere. Adding a video makes its own poster, clips and web copy;
+their own, at nice 10. Everything the server builds shares one budget of
+working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
+(one single-threaded vips), a preview clip job 3 (its decoder thread,
+its filter thread, and the per-tier encoders of tiny pictures, which
+together use about one core), a mosaic at least half the budget and all
+of it that is free when it starts, split by its tile count between
+decoder lanes (a decoder thread and a compositing thread each, about one
+per 600 tiles) and x264 (at least a quarter): on 16 idle CPUs a full h25
+sheet gets 5 lanes and 5 encoder threads, an h200 sheet 1 lane and 13; a
+web copy at most half the budget and 8 (one decoder, one filter thread,
+the rest x264). Each job is started with exactly those thread options, and a job
+starts only when its units are free, so the working threads never
+outnumber the CPUs. Photos come first: while photos wait, no video job
+starts. Clips and mosaics go before web copies, and as a web copy takes at
+most half the budget, a new folder's previews do not wait behind hours of
+web copies elsewhere. Adding a video makes its own poster, clips and web copy;
 the mosaics are assembled again from the cached clips, and a sheet whose
 tiles did not change is reused (hard-linked) instead of encoded again.
-Removing or replacing a video deletes its clips and web copy, and every
-video atlas that shows it.
+Tiles keep their places from one atlas to the next: a new video goes after
+the last tile of each tier, a removed one leaves a gap (until the gaps add
+up to a whole sheet, when the tier is packed afresh), so adding or removing
+one video re-encodes one sheet per tier however large the folder.
+Removing or replacing a video deletes its clips and web copy, and withdraws
+at once every video atlas that shows it.
+
+When the atlas settings change (`VIDEO_TIERS`, the preview's length or
+frame rate) or a new version encodes mosaics differently, each folder's
+atlas is made again the next time its video work runs (at startup, at
+latest): only missing clip tiers are made (one more pass over each video's
+first minute for a new tier), sheets whose content is unchanged are
+reused, and web copies and posters are not touched. This version's clips
+have a keyframe every second, which earlier clips lack, so after upgrading
+every clip is made once more.
+
+A clip or web copy that failed because the machine was short of something
+(tasks, memory, disk, file handles; ffmpeg killed) is tried again by
+itself after 5 minutes (`VIDEO_RETRY_SECONDS`), then at doubling intervals
+up to 6 hours, 8 times;
+one that failed because of the file waits for a rescan or a new file.
 
 What the page gets: the manifest (`gg/_manifest.json`) has
 `videos: { "<name>": { duration, web, hasAudio, width, height } }` for every
@@ -281,14 +325,27 @@ browsers need to play and seek video.
 
 Measured on a 16-thread container (one Proxmox LXC):
 
+- One full mosaic, made alone from cached clips of real 20 s 480p videos:
+  h25, 4,599 tiles in 3796x2142, 132 s with 8 decoder lanes (16 CPUs,
+  otherwise lightly loaded), 121 MB at the h25 ceiling of 16 Mbit/s;
+  h50, 1,480 tiles in 3840x2146, 91 MB at 12 Mbit/s (measured on a machine
+  at load 100, 10 minutes). A sheet build uses about 90 threads and 2.5 GB
+  (about 1 GB in the compositor, 1.5 GB in x264), whatever its tile count.
+  Pictures: h25 tiles are recognisable at their own size and blocky when
+  enlarged; h50 at 12 Mbit/s is slightly softer than uncapped (22 Mbit/s).
+- 466 films of the Prelinger archive (35 GB, about 8 minutes each): preview
+  clips 687 s, the video atlas 309 s for 7 sheets (h25 1 sheet of
+  3832x204, 11 MB; h50 1, 25 MB; h100 1, 69 MB; h200 4, 58 MB each when
+  full); the web copies take hours (each film is decoded and encoded).
 - A folder of 150 short synthetic videos (3 to 6 s, five shapes from 4:1 to
-  9:16): stills browsable after 42 s, video atlas after 161 s (clips 29 s,
-  four mosaics 89 s), web copies a few seconds later (they were already
-  H.264, so copied). Mosaics: h50 3812x232 6.5 MB, h100 3838x864 24 MB,
-  h200 3822x2080 58 MB and 3548x1040 27 MB; the clips took 46 MB in `gg/`.
-  The test pattern is far busier than real video; mosaics are capped at
-  CRF 26 and 8 Mbit/s for a full 4K sheet, so a full sheet is at most about
-  60 MB, and real footage usually stays well below the cap.
+  9:16): mosaics h25 3818x102 5.7 MB, h50 3812x232 10 MB, h100 3838x864
+  31 MB, h200 3822x2080 58 MB and 3548x1040 27 MB. The test pattern is far
+  busier than real video and fills the bitrate ceiling.
+- Adding one video to a built folder makes its poster, its clips (a second
+  or two) and its web copy, re-encodes the last mosaic of each tier (at
+  10,000 videos four full 4K sheets, two at a time: about 5 minutes on 16
+  CPUs) and reuses every other sheet; removing one re-encodes the sheet it
+  was on. The still atlas is baked again as upstream does for a photo.
 - Real clips (Big Buck Bunny, Sintel, Tears of Steel and others, 26 files
   in 12 containers): 12 clips of 3 to 90 s gave mosaics of 1.5 MB (h50),
   3.8 MB (h100) and 10 MB (h200, 3360x416); preview clips take about 2 MB
@@ -301,6 +358,26 @@ Measured on a 16-thread container (one Proxmox LXC):
   file of the same length per video, plus the clips and the mosaics.
 - ffprobe runs on every video at every rebuild of its folder that finds it
   new or changed; a poster costs a few seconds of decoding.
+
+### Crash safety
+
+The video work picks up by itself after a crash, `kill -9`, power cut or
+reboot, from what it finished. Every clip, web copy, mosaic and state file
+is written under a temp name, flushed to disk (fsync) and renamed, so it
+appears complete or not at all; the record of what is made
+(`_videos.json`) changes only after the file it describes is published,
+and is written at most every 2 s, so a crash can lose news of finished
+work (which is then done again) but never claim unfinished work. An atlas
+is built in `video_<id>_building/` and renamed only when complete, and
+the manifest names it only after that. Each finished mosaic in a building
+directory has a `.key` file, so the next attempt after a crash reuses it;
+an atlas finished but not yet committed when the server died is committed
+as it is. At startup the server stops ffmpeg processes a killed run left
+behind (`STATE_DIR/ffmpeg-children/`), sweeps temp files, and the startup
+walk starts every folder's video work, which goes through one shared queue.
+`check_crash.py` (outside the repository) kills the server and its ffmpeg
+children at the phases of the video work and checks that the folder ends
+exactly as an uninterrupted build does.
 
 ### Limits
 
@@ -412,10 +489,11 @@ is refused as ambiguous).
 | `VIPS_CONCURRENCY` | `1` | Threads inside each vips process. Builds run several processes instead (`BUILD_CONCURRENCY`) |
 | `VIDEO_PREVIEW_SECONDS` | `60` | Length of every mosaic, and of the part of each video it shows (2 to 600) |
 | `VIDEO_PREVIEW_FPS` | `24` | Frame rate of the mosaics (1 to 30) |
-| `VIDEO_TIERS` | `50,100,200` | Tile heights of the video atlas, even, 16 to 1080, at most six |
-| `VIDEO_SHEET_MAX_TILES` | `450` | Most tiles in one mosaic (one ffmpeg opens this many clips at once) |
+| `VIDEO_TIERS` | `25,50,100,200` | Tile heights of the video atlas, 16 to 1080, at most six |
+| `VIDEO_MOSAIC_MEMORY` | `512MiB` | Frame buffers of one mosaic being made (two chunks of whole seconds, at least one second each) |
+| `VIDEO_RETRY_SECONDS` | `300` | A clip or web copy that failed for a passing reason (out of tasks, memory or disk; ffmpeg killed) is tried again after this, then at doubling intervals up to 6 hours, 8 times; a failed atlas after twice this |
 | `VIDEO_WEB_MAX_HEIGHT` | `1080` | Short side of the web copy at most (the long side at most 16:9 of it); never upscaled |
-| `VIDEO_BUILD_CONCURRENCY` | CPUs / 4, 2 to 8 | ffmpeg processes at once for clips, mosaics and web copies (each at nice 10, each multi-threaded); `0` means the default |
+| `CPU_BUDGET` | CPU count | Working threads for all builds at once, photos and videos (photo builds are also limited by `BUILD_CONCURRENCY`); `0` means CPU count |
 | `FFMPEG_TIMEOUT_SECONDS` | `14400` | An ffmpeg run longer than this is stopped and its video's clips or web copy counted as failed (a rescan tries again) |
 | `GG_DEBUG_BUILDS` | unset | Any value logs a line for every photo the build queue looks at |
 | `GG_ENV_FILE` | `/etc/ggvideo.env` | The settings file `login-link` reads (the unit's `EnvironmentFile=` must name the same file) |
@@ -442,7 +520,8 @@ is refused as ambiguous).
   shutdown, the startup check); `lib/videos.js` is one video's files
   (probe, poster, preview clips, web copy, the `_videos.json` record);
   `lib/video_atlas.js` lays out and encodes the mosaics and documents
-  `_video.json`; `lib/video_stage.js` runs the video work of each folder
+  `_video.json`, composing them in `lib/mosaic_worker.js` and
+  `lib/mosaic_lane_worker.js` (worker threads); `lib/video_stage.js` runs the video work of each folder
   after its stills are committed.
 - `lib/auth.js`, `lib/webauthn.js` and `lib/admin_api.js` handle the passkey
   admin; `lib/upload.js` the chunked uploader; `lib/trash.js` the trash;
