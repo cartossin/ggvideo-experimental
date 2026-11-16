@@ -1609,6 +1609,12 @@
       drawDynamic(batches);
       gl.disable(gl.BLEND);
     }
+    function drawStaticBlended(batches) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      drawStatic(batches);
+      gl.disable(gl.BLEND);
+    }
 
     function hasTexture(key) { return textures.has(key); }
 
@@ -1620,7 +1626,7 @@
       uploadStatic: uploadStatic, dropStatic: dropStatic,
       releaseAllStatic: releaseAllStatic, hasStatic: hasStatic,
       beginFrame: beginFrame, beginOverlay: beginOverlay,
-      drawStatic: drawStatic, drawDynamic: drawDynamic, drawBlended: drawBlended,
+      drawStatic: drawStatic, drawDynamic: drawDynamic, drawBlended: drawBlended, drawStaticBlended: drawStaticBlended,
       hasTexture: hasTexture,
     };
   })();
@@ -2428,6 +2434,12 @@
       if (instances.length && ensureTexture()) gridRenderer.drawBlended([{ textureKey: TEXTURE_KEY, instances: instances }]);
     }
 
+    // Badges from instance buffers already on the GPU (a sheet's tiles).
+    function drawStatic(instanceKeys) {
+      if (!ensureTexture()) return;
+      gridRenderer.drawStaticBlended(instanceKeys.map(function (key) { return { textureKey: TEXTURE_KEY, instanceKey: key }; }));
+    }
+
     // Every badge in the canvas buffer; the end of a full grid draw.
     function drawForBuffer() {
       if (!anyVideos() || !canvasEl) return;
@@ -2441,7 +2453,7 @@
       if (gridRenderer.beginOverlay(canvasEl.width / dpr, bufferH, bufferTop - glOriginY)) draw(instancesFor(tiles));
     }
 
-    return { instancesFor: instancesFor, draw: draw, drawForBuffer: drawForBuffer,
+    return { instancesFor: instancesFor, draw: draw, drawStatic: drawStatic, drawForBuffer: drawForBuffer,
       setDurationsShown: setDurationsShown };
   })();
 
@@ -2514,7 +2526,8 @@
     var chosenTier = null;
     var idealTier = null;
     var framePumpRaf = null;       // without requestVideoFrameCallback: one loop for all sheets
-    var counters = { uploads: 0, uploadMs: 0, drawMs: 0 };
+    var counters = { uploads: 0, uploadMs: 0, drawMs: 0, drawCalls: 0, collects: 0 };
+    var staticBufferKeys = [];     // the GPU instance buffers of sheetsInBuffer
 
     function sheetKey(tierHeight, sheetIndex) { return 'h' + tierHeight + ':' + sheetIndex; }
     function textureKeyOf(key) { return 'video:' + key; }
@@ -2599,12 +2612,12 @@
     // from, and its instance (where on the canvas, which rectangle of the
     // sheet). Nothing when the view stays posters (tierHeight null).
     function collectSheetsInBuffer(dpr, tierHeight) {
+      counters.collects++;
       sheetsInBuffer = new Map();
-      if (tierHeight === null) return;
-      var tier = atlas.tiers['h' + tierHeight];
+      var tier = tierHeight === null ? null : atlas.tiers['h' + tierHeight];
       var perSheet = new Map();
       var bufferBottom = bufferTop + bufferH;
-      for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
+      for (var i = firstTileIndexAtOrBelow(bufferTop); tier && i < lastTileRects.length; i++) {
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         var atlasIndex = atlasIndexByName.get(t.name);
@@ -2619,9 +2632,27 @@
         entry.values.push(t.x, t.y - glOriginY, t.w, t.h,
           rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
       }
+      // Each sheet's instances (and its tiles' badges) go to the GPU once
+      // per full draw, as the still atlas's do: a new frame is then one
+      // draw call per sheet, however many thousand tiles it has on screen,
+      // with no work per tile.
+      var previousBuffers = staticBufferKeys;
+      staticBufferKeys = [];
       perSheet.forEach(function (entry, key) {
-        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instances: new Float32Array(entry.values),
-          badgeInstances: videoBadges.instancesFor(entry.tiles) });
+        var instanceKey = 'video-tiles:' + key;
+        gridRenderer.uploadStatic(instanceKey, new Float32Array(entry.values));
+        staticBufferKeys.push(instanceKey);
+        var badgeKey = null;
+        var badges = videoBadges.instancesFor(entry.tiles);
+        if (badges.length) {
+          badgeKey = 'video-badges:' + key;
+          gridRenderer.uploadStatic(badgeKey, badges);
+          staticBufferKeys.push(badgeKey);
+        }
+        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instanceKey: instanceKey, badgeKey: badgeKey });
+      });
+      previousBuffers.forEach(function (bufferKey) {
+        if (staticBufferKeys.indexOf(bufferKey) < 0) gridRenderer.dropStatic(bufferKey);
       });
     }
 
@@ -2647,18 +2678,22 @@
     // grid draw draws every badge once afterwards instead.
     function drawSheets(keys, withBadges) {
       var batches = [];
-      var badgeInstances = [];
+      var badgeKeys = [];
       keys.forEach(function (key) {
         var player = players.get(key);
         var entry = sheetsInBuffer.get(key);
         if (!player || !player.hasFrame || !entry) return;
-        batches.push({ textureKey: textureKeyOf(key), instances: entry.instances });
-        if (withBadges) badgeInstances.push(entry.badgeInstances);
+        batches.push({ textureKey: textureKeyOf(key), instanceKey: entry.instanceKey });
+        if (withBadges && entry.badgeKey) badgeKeys.push(entry.badgeKey);
       });
       if (!batches.length || !lastDraw) return;
       if (!gridRenderer.beginOverlay(lastDraw.W, lastDraw.bufferH, lastDraw.topOffset)) return;
-      gridRenderer.drawDynamic(batches);
-      badgeInstances.forEach(videoBadges.draw);
+      gridRenderer.drawStatic(batches);
+      counters.drawCalls += batches.length;
+      if (badgeKeys.length) {
+        videoBadges.drawStatic(badgeKeys);
+        counters.drawCalls += badgeKeys.length;
+      }
     }
 
     function afterGridDraw() {
@@ -2867,7 +2902,7 @@
         if (player.hasFrame) textureBytes += player.video.videoWidth * player.video.videoHeight * 4;
       });
       return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
-        idealTier: idealTier, chosenTier: chosenTier,
+        idealTier: idealTier, chosenTier: chosenTier, drawCalls: counters.drawCalls, collects: counters.collects,
         textureBytes: textureBytes, uploads: counters.uploads, uploadMs: counters.uploadMs, drawMs: counters.drawMs };
     }
 
