@@ -2465,7 +2465,6 @@
         .filter(function (h) { return h > 0; }).sort(function (a, b) { return a - b; });
       atlas.names.forEach(function (name, index) { atlasIndexByName.set(name, index); });
     }
-    var reducedMotionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
     var frameCallbackSupported = typeof HTMLVideoElement !== 'undefined' &&
       'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
@@ -2492,9 +2491,13 @@
       return tierHeights[tierHeights.length - 1];
     }
 
+    // Whether the grid is showing, so its sheets may play. Not gated on
+    // prefers-reduced-motion: many people switch Reduce Motion on for the
+    // system's own animations (the owner among them), and with it the
+    // moving tiles, this fork's point, would never be seen. An opened video
+    // still does not start by itself under it (setMainVideoSource).
     function motionAllowed() {
-      return !!canvasEl && focusedIdx === 0 && gridRenderer.available() &&
-        !(reducedMotionQuery && reducedMotionQuery.matches) && document.visibilityState !== 'hidden';
+      return !!canvasEl && focusedIdx === 0 && gridRenderer.available() && document.visibilityState !== 'hidden';
     }
 
     // ---- what the buffer shows ----
@@ -2746,22 +2749,12 @@
       players.forEach(function (player) { player.hasFrame = false; player.lastUploadedTime = -1; });
     }
 
-    // Motion preference or page visibility changed: the next full draw
-    // decides again (and puts posters back if motion stopped).
-    function onConditionsChanged() {
+    // Page visibility changed: the next full draw decides again.
+    function onVisibilityChanged() {
       if (!motionAllowed()) pauseAll();
       if (canvasEl) scheduleGridRedraw();
     }
-    if (atlas) {
-      document.addEventListener('visibilitychange', onConditionsChanged);
-      if (reducedMotionQuery && reducedMotionQuery.addEventListener) {
-        reducedMotionQuery.addEventListener('change', function () {
-          // Reduced motion: free everything, not just pause.
-          if (reducedMotionQuery.matches) Array.from(players.values()).forEach(releasePlayer);
-          onConditionsChanged();
-        });
-      }
-    }
+    if (atlas) document.addEventListener('visibilitychange', onVisibilityChanged);
 
     function stats() {
       var list = [];

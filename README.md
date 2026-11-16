@@ -256,10 +256,11 @@ browsers need to play and seek video.
   tile from its height in device pixels, like the per-photo tiers. At most
   4 sheets play and 8 are kept; a sheet off screen pauses at once and is
   freed after 15 s. Posters stay where nothing plays: tiles under 24
-  device pixels, `prefers-reduced-motion`, a hidden page, the photo view,
-  a video not in the atlas yet, and a sheet that could not be loaded or
-  decoded. Every video tile big enough has a small badge: a play triangle
-  and its duration.
+  device pixels, a hidden page, the photo view, a video not in the atlas
+  yet, and a sheet that could not be loaded or decoded. The tiles move
+  with `prefers-reduced-motion` too (it is often on for the system's own
+  animations); only an opened video then waits for a click. Every video
+  tile big enough has a small badge: a play triangle and its duration.
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a
