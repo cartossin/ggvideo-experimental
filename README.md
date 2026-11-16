@@ -240,18 +240,24 @@ their own, at nice 10. Everything the server builds shares one budget of
 working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
 (one single-threaded vips), a preview clip job 3 (its decoder thread,
 its filter thread, and the per-tier encoders of tiny pictures, which
-together use about one core), a mosaic at least half the budget and all
-of it that is free when it starts, split by its tile count between
-decoder lanes (a decoder thread and a compositing thread each, about one
-per 600 tiles) and x264 (at least a quarter): on 16 idle CPUs a full h25
-sheet gets 5 lanes and 5 encoder threads, an h200 sheet 1 lane and 13; a
-web copy at most half the budget and 8 (one decoder, one filter thread,
-the rest x264). Each job is started with exactly those thread options, and a job
-starts only when its units are free, so the working threads never
-outnumber the CPUs. Photos come first: while photos wait, no video job
-starts. Clips and mosaics go before web copies, and as a web copy takes at
-most half the budget, a new folder's previews do not wait behind hours of
-web copies elsewhere. Adding a video makes its own poster, clips and web copy;
+together use about one core), a web copy at most half the budget and 8
+(one decoder, one filter thread, the rest x264), a mosaic sheet what is
+left beside one web copy, at most 8, split between decoder lanes (a
+decoder thread and a compositing thread each) and x264 in proportion to
+their measured work, which depends on the sheet's tile count: a full h25
+sheet gets 5 lanes and 2 encoder threads, an h100 sheet 2 and 5. A bigger
+sheet share would not make a sheet faster (x264 or the lanes would wait),
+so a bigger budget composes several sheets side by side, of one folder or
+several, as many as half the memory allows at 3 GiB each (a 4K sheet
+peaks at 2.4 to 2.8 GB). Each job is started with exactly those thread
+options, and a job starts only when its units are free, so the working
+threads never outnumber the CPUs. Photos come first: while photos wait,
+no video job starts. Clips and mosaics go before web copies, except that
+one web copy at a time never waits for them: a folder of thousands of
+videos keeps the mosaics busy for hours, and its web copies (what plays
+when a video is opened) are made alongside. As a web copy takes at most
+half the budget, a new folder's previews do not wait behind hours of web
+copies elsewhere either. Adding a video makes its own poster, clips and web copy;
 the mosaics are assembled again from the cached clips, and a sheet whose
 tiles did not change is reused (hard-linked) instead of encoded again.
 Tiles keep their places from one atlas to the next: a new video goes after
@@ -296,24 +302,17 @@ browsers need to play and seek video.
 - **Grid.** Each mosaic sheet with a tile on screen plays in one hidden,
   muted, looping `<video>`; every new frame is uploaded to a WebGL texture
   and that sheet's tiles are drawn over their posters (the drawing buffer
-  is kept, so a frame does not redraw the grid). One tier serves every
-  tile in view: the one the tallest video tile on screen wants (by its
-  height in device pixels, like the per-photo tiers), or, when the tiles
-  on screen are spread over more of its sheets than can play at once, the
-  largest smaller tier whose sheets all can (motion everywhere beats
-  sharpness); posters only when even the smallest tier cannot. At most
+  is kept, so a frame does not redraw the grid). The tier is chosen per
+  tile from its height in device pixels, like the per-photo tiers. At most
   4 sheets play and 8 are kept; a sheet off screen pauses at once and is
-  freed after 15 s. Posters stay where nothing plays: tiles under half
-  the smallest tier's height in device pixels (no mipmaps, so no more
-  than 2x minification), a hidden page, the photo view, a video not in the atlas
+  freed after 15 s. Posters stay where nothing plays: tiles under 24
+  device pixels, a hidden page, the photo view, a video not in the atlas
   yet, and a sheet that could not be loaded or decoded. The tiles move
   with `prefers-reduced-motion` too (it is often on for the system's own
-  animations); only an opened video then waits for a click. While the
-  mouse is over the top controls' pull tab, or the controls are open
-  (on a touch screen: after a tap on the tab), every video tile at least
-  60 px high and 40 wide shows a small badge with a play triangle and
-  its duration (the triangle alone where the duration does not fit);
-  otherwise there is no badge at all.
+  animations); only an opened video then waits for a click. Every video
+  tile big enough has a small badge, a play triangle; its duration is
+  added while the mouse is over the top controls' pull tab or the
+  controls are revealed (not on touch screens).
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a
