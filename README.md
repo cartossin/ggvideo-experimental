@@ -224,11 +224,10 @@ What the server makes for each video, in this order:
    ffmpeg encodes the finished frames, which it reads raw from a pipe. The
    tiles' clips are read a second at a time by a few single-threaded
    decoders, each going through its share of the clips one after the
-   other, so a sheet of 4,600 tiles costs about ten processes and a
-   hundred threads, not one decoder per tile. Its memory is two chunks of
-   frames (`VIDEO_MOSAIC_MEMORY`, 512 MiB, at least a second each: about
-   600 MB at 4K) plus x264's (about 1.5 GB at 4K); at most two mosaics are
-   made at once.
+   other, so a sheet of 4,600 tiles costs a handful of processes, not one
+   decoder per tile. Its memory is two chunks of frames
+   (`VIDEO_MOSAIC_MEMORY`, 512 MiB, at least a second each: about 600 MB
+   at 4K) plus x264's (about 1 to 1.5 GB at 4K).
 3. **Web copy.** `gg/<name>.web.mp4`: H.264 High, yuv420p, AAC stereo (or no
    sound if the video has none), the index at the front of the file
    (faststart), at most `VIDEO_WEB_MAX_HEIGHT` (1080) lines on the short
@@ -237,10 +236,20 @@ What the server makes for each video, in this order:
    sound is converted if it is not AAC stereo).
 
 Steps 2 and 3 run after the folder's build is committed, in a queue of
-their own (`VIDEO_BUILD_CONCURRENCY` ffmpeg processes at once, at nice 10).
-Clips and mosaics go before web copies, and web copies never take the last
-free lane, so a new folder's previews do not wait behind hours of web
-copies elsewhere. Adding a video makes its own poster, clips and web copy;
+their own, at nice 10. Everything the server builds shares one budget of
+working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
+(one single-threaded vips), a preview clip job 3 (its decoder thread,
+its filter thread, and the per-tier encoders of tiny pictures, which
+together use about one core), a mosaic at least half the budget and all
+of it that is free when it starts (on 16 idle CPUs: 5 decoder lanes of a
+decoder thread and a compositing thread each, 4 x264 threads, the
+compositor), a web copy at most half the budget and 8 (one decoder, one
+filter thread, the rest x264). Each job is started with exactly those thread options, and a job
+starts only when its units are free, so the working threads never
+outnumber the CPUs. Photos come first: while photos wait, no video job
+starts. Clips and mosaics go before web copies, and as a web copy takes at
+most half the budget, a new folder's previews do not wait behind hours of
+web copies elsewhere. Adding a video makes its own poster, clips and web copy;
 the mosaics are assembled again from the cached clips, and a sheet whose
 tiles did not change is reused (hard-linked) instead of encoded again.
 Tiles keep their places from one atlas to the next: a new video goes after
@@ -475,7 +484,7 @@ is refused as ambiguous).
 | `VIDEO_MOSAIC_MEMORY` | `512MiB` | Frame buffers of one mosaic being made (two chunks of whole seconds, at least one second each) |
 | `VIDEO_RETRY_SECONDS` | `300` | A clip or web copy that failed for a passing reason (out of tasks, memory or disk; ffmpeg killed) is tried again after this, then at doubling intervals up to 6 hours, 8 times; a failed atlas after twice this |
 | `VIDEO_WEB_MAX_HEIGHT` | `1080` | Short side of the web copy at most (the long side at most 16:9 of it); never upscaled |
-| `VIDEO_BUILD_CONCURRENCY` | CPUs / 4, 2 to 8 | ffmpeg processes at once for clips, mosaics and web copies (each at nice 10, each multi-threaded); `0` means the default |
+| `CPU_BUDGET` | CPU count | Working threads for all builds at once, photos and videos (photo builds are also limited by `BUILD_CONCURRENCY`); `0` means CPU count |
 | `FFMPEG_TIMEOUT_SECONDS` | `14400` | An ffmpeg run longer than this is stopped and its video's clips or web copy counted as failed (a rescan tries again) |
 | `GG_DEBUG_BUILDS` | unset | Any value logs a line for every photo the build queue looks at |
 | `GG_ENV_FILE` | `/etc/ggvideo.env` | The settings file `login-link` reads (the unit's `EnvironmentFile=` must name the same file) |
