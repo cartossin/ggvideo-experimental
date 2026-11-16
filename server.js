@@ -44,6 +44,7 @@ async function startServer() {
   const { preflightFfmpeg, stopFfmpegProcesses } = await import('./lib/ffmpeg.js');
   preflightFfmpeg();
   const { stopAtlasWorker } = await import('./lib/atlas.js');
+  const { stopMosaicWorkers } = await import('./lib/video_atlas.js');
   const { getPasskey, sessions } = await import('./lib/auth.js');
   const { brokenTilesReady } = await import('./lib/build.js');
   const { sendText } = await import('./lib/http.js');
@@ -82,7 +83,7 @@ async function startServer() {
       console.log(`[shutdown] ${signal}: stopping image and video builds`);
       stopVipsProcesses();
       stopFfmpegProcesses();
-      await stopAtlasWorker();
+      await Promise.all([stopAtlasWorker(), stopMosaicWorkers()]);
       // End the way the signal would have, so systemd and shells see the
       // usual status for it.
       process.kill(process.pid, signal);
