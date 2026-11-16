@@ -5,6 +5,9 @@
 //   GALLERIES_ROOT/<path...>/<image>                    originals
 //   GALLERIES_ROOT/<path...>/gg/<image>.h<H>.<format>   per-image LoDs (avif/v)
 //   GALLERIES_ROOT/<path...>/gg/atlas_<hash>/           sprite atlases + imagemap
+//   GALLERIES_ROOT/<path...>/gg/<video>.web.mp4         playable copy of a video
+//   GALLERIES_ROOT/<path...>/gg/<video>.v<H>.mp4        preview clips (video atlas input)
+//   GALLERIES_ROOT/<path...>/gg/video_<id>/             video atlas: mosaics + _video.json
 //   GALLERIES_ROOT/<path...>/gg/_manifest.json          per-gallery manifest
 //   GALLERIES_ROOT/<path...>/gg/trash/<image>           soft-deleted (per-folder)
 //   GALLERIES_ROOT/<path...>/gg/hidden                  sentinel: folder hidden from listings
