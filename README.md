@@ -7,6 +7,15 @@
 > to untrusted users or untrusted files. Use upstream Goodgallery for a
 > photo gallery you put on the internet.
 
+What this fork adds to Goodgallery 2.0.0-rc.4: folders may hold videos next
+to photos. A video shows in the grid as a still (its poster frame, built
+exactly like a photo), then as a moving preview: all of a folder's previews
+are packed into a few mosaic videos per size, which the viewer plays once
+and cuts into tiles, the way the still grid uses sprite atlases. Opening a
+video plays a browser-friendly copy (H.264 + AAC). See [Video](#video).
+The browser side of the moving previews is being written separately; this
+server already hands the page everything it needs.
+
 ## Goodgallery
 
 A web-based photo gallery solution focusing on ui and performance. One Node.js process, no npm
@@ -46,6 +55,11 @@ What makes it different:
   missing, if `vips`, `vipsthumbnail` or `vipsheader` are missing, libvips
   is older than 8.13 (needed to keep its risky loaders away from uploaded
   files), or the AVIF encode fails.
+- ffmpeg and ffprobe with the libx264 and AAC encoders and the `xstack`,
+  `thumbnail`, `fillborders`, `scale` and `pad` filters (Debian's and
+  Ubuntu's `ffmpeg` package has all of them; `zscale`, also in it, is used
+  to tone-map HDR video). At startup the server encodes a tenth of a second
+  of H.264 + AAC and refuses to start, naming what is missing, if it cannot.
 - Optional: HTTPS in front of it (nginx, Caddy, a tunnel). Browsers only
   offer passkeys on secure origins, so passkey sign-in needs HTTPS or
   `localhost`; without it you sign in with links made on the server. The
@@ -60,13 +74,13 @@ What makes it different:
 Debian 13 or Ubuntu 24.04:
 
 ```sh
-apt update && apt install -y git nodejs libvips-tools libheif-plugin-aomenc
-useradd -r -s /usr/sbin/nologin -d /var/lib/goodgallery goodgallery
-git clone https://github.com/cartossin/goodgallery.git /opt/goodgallery
-mkdir -p /var/lib/goodgallery/galleries
-chown -R goodgallery:goodgallery /var/lib/goodgallery
-install -m 644 /opt/goodgallery/goodgallery.service /etc/systemd/system/
-systemctl enable --now goodgallery
+apt update && apt install -y git nodejs libvips-tools libheif-plugin-aomenc ffmpeg
+useradd -r -s /usr/sbin/nologin -d /var/lib/ggvideo ggvideo
+# a copy of this repository in /opt/ggvideo (it is not published)
+mkdir -p /var/lib/ggvideo/galleries
+chown -R ggvideo:ggvideo /var/lib/ggvideo
+install -m 644 /opt/ggvideo/ggvideo.service /etc/systemd/system/
+systemctl enable --now ggvideo
 ```
 
 Rocky Linux or RHEL 9: the default Node stream is 16 and libvips is not in
@@ -80,14 +94,16 @@ dnf install -y vips-tools vips-heif
 ```
 
 and the rest is the same. `vips-heif` is the AVIF support; the server
-needs it.
+needs it. ffmpeg on RHEL comes from RPM Fusion, which this fork has not
+been tried with.
 
-Each of these was run on a fresh container of that distro, followed by the
-first-run steps below.
+These steps are upstream Goodgallery's, which were run on a fresh
+container of each distro; with this fork only the Debian 13 one has been
+used.
 
-The unit runs as the `goodgallery` user on port 3000 with galleries under
-`/var/lib/goodgallery/galleries` and state under `/var/lib/goodgallery`.
-To change any of that, put the settings in `/etc/goodgallery.env` (see
+The unit runs as the `ggvideo` user on port 3000 with galleries under
+`/var/lib/ggvideo/galleries` and state under `/var/lib/ggvideo`.
+To change any of that, put the settings in `/etc/ggvideo.env` (see
 Configuration) and restart the service. Edit that file rather than the
 unit: `node server.js login-link` reads the same file, so the link it makes
 points at the port the service listens on and is written where the service
@@ -95,13 +111,13 @@ looks for it.
 
 Upgrading from a version whose unit has `Environment=PORT=...` lines: that
 unit keeps working as it is. If you changed those values, move them into
-`/etc/goodgallery.env` when you install the new unit, or `login-link` will
+`/etc/ggvideo.env` when you install the new unit, or `login-link` will
 not know them.
 
 The unit sets `UMask=0077`, so the photos and folders the service creates
 (uploads, folders made on the admin page) are readable only by the
-`goodgallery` user. If other users or a file share (SMB, NFS) must read
-them, override it with `systemctl edit goodgallery`:
+`ggvideo` user. If other users or a file share (SMB, NFS) must read
+them, override it with `systemctl edit ggvideo`:
 `[Service]` then `UMask=0022`. The sign-in files in the state dir
 (passkey, sessions, login links) stay private either way.
 
@@ -111,12 +127,12 @@ from its own environment only.
 ## First run
 
 1. On the server, as root, run
-   `node /opt/goodgallery/server.js login-link` and open the link it prints
-   within 10 minutes. It reads `/etc/goodgallery.env` as the service does,
+   `node /opt/ggvideo/server.js login-link` and open the link it prints
+   within 10 minutes. It reads `/etc/ggvideo.env` as the service does,
    and leaves its file owned by the state dir's owner, so the service can
    read it. To run it as the service user instead (it has no login shell,
    so `su` does not work):
-   `sudo -u goodgallery node /opt/goodgallery/server.js login-link`. The
+   `sudo -u ggvideo node /opt/ggvideo/server.js login-link`. The
    browser that opens the link stays signed in until it signs out, is
    signed out from the admin page, or loses the cookie. There is no other
    way in on a fresh install, so nobody can claim the admin by reaching the
@@ -139,7 +155,7 @@ from its own environment only.
    and press **Create passkey** at the new address.
 3. Create a folder or upload images from the admin page, or copy a directory
    of images into the galleries root, give it to the service user
-   (`chown -R goodgallery:goodgallery <folder>`: a folder the service
+   (`chown -R ggvideo:ggvideo <folder>`: a folder the service
    cannot write cannot be built, and the admin page says so), and press
    **Rescan all folders**
    (under Troubleshooting on the admin page).
@@ -155,13 +171,122 @@ Remove it from the originals before adding them if it should stay private.
 A hidden folder is only left out of listings; anyone with its address can
 open it.
 
-Supported source formats: JPEG, PNG, GIF, WebP, AVIF. A photo libvips cannot
+Supported source formats: JPEG, PNG, GIF, WebP, AVIF, and video files with
+the extensions mp4, m4v, mov, mkv, webm, avi, wmv, flv, mpg, mpeg, ts,
+m2ts, mts, 3gp, ogv, asf, divx and vob, in whatever codec ffmpeg decodes
+(ffprobe decides; see [Video](#video)). A photo libvips cannot
 read, one above the pixel limit (`MAX_SOURCE_MEGAPIXELS`), or one whose
 conversion failed gets a red placeholder tile instead of breaking the
 gallery, and the admin page names it and says why. Rescanning the folder
 tries failed conversions again. A photo whose file name is longer than 233
 bytes is left out, with a line in the log: its renditions' names would not
-fit the filesystem's 255-byte limit.
+fit the filesystem's 255-byte limit. A video ffmpeg cannot read gets the
+same placeholder and is listed like a broken photo (its original is still
+served at its URL).
+
+## Video
+
+Videos are files in a gallery folder like photos, in any order with them:
+listed, uploaded (the chunked uploader takes files up to `MAX_UPLOAD_BYTES`,
+64 GiB by default; finishing an upload needs room for the file twice while
+its chunks are joined), moved to the trash, restored and rescanned the same
+way. The extension says a file is a video; ffprobe then decides whether it
+has a video stream ffmpeg can decode.
+
+What the server makes for each video, in this order:
+
+1. **Poster and renditions.** One representative frame from the first
+   seconds (from one second in, ffmpeg's `thumbnail` filter choosing among
+   18 candidates, so a black or blurred first frame is not taken), upright
+   (rotation metadata applied), with square pixels (anamorphic video
+   widened), HDR tone-mapped, interlaced video deinterlaced. That frame goes
+   through the photo pipeline, so a video gets the same AVIF renditions and
+   the same place in the still atlas as a photo. The grid therefore works
+   for videos with no viewer change, and the folder is browsable as soon as
+   its stills are built.
+2. **Preview clips and the video atlas.** Each video's first
+   `VIDEO_PREVIEW_SECONDS` (60), without sound, at a constant
+   `VIDEO_PREVIEW_FPS` (24), scaled to each tier's tile height (`VIDEO_TIERS`:
+   50, 100 and 200 px; wider than 4:1 is shrunk to 4:1) are cached as small
+   clips in `gg/`. All of a folder's clips are then packed into mosaic
+   videos, one or more per tier (at most 3840x2160 and 30 fps, so hardware
+   decoding works everywhere; at most `VIDEO_SHEET_MAX_TILES` tiles each),
+   each exactly 60 s long so they all loop together; a shorter video loops
+   inside its tile. Each tile is surrounded by 4 px of its own edge pixels
+   so compression never mixes neighbours. A viewer plays one mosaic per
+   tier, uploads it to a WebGL texture each frame and cuts tiles out of it.
+   The layout is in `gg/video_<id>/_video.json`; its exact format is
+   documented at the top of `lib/video_atlas.js`.
+3. **Web copy.** `gg/<name>.web.mp4`: H.264 High, yuv420p, AAC stereo (or no
+   sound if the video has none), the index at the front of the file
+   (faststart), at most `VIDEO_WEB_MAX_HEIGHT` (1080) lines on the short
+   side and never upscaled, frame rate kept (at most 60). A video that is
+   already H.264 of that kind is copied rather than encoded again (only its
+   sound is converted if it is not AAC stereo).
+
+Steps 2 and 3 run after the folder's build is committed, in a queue of
+their own (`VIDEO_BUILD_CONCURRENCY` ffmpeg processes at once, at nice 10).
+Clips and mosaics go before web copies, and web copies never take the last
+free lane, so a new folder's previews do not wait behind hours of web
+copies elsewhere. Adding a video makes its own poster, clips and web copy;
+the mosaics are assembled again from the cached clips, and a sheet whose
+tiles did not change is reused (hard-linked) instead of encoded again.
+Removing or replacing a video deletes its clips and web copy, and every
+video atlas that shows it.
+
+What the page gets: the manifest (`gg/_manifest.json`) has
+`videos: { "<name>": { duration, web, hasAudio, width, height } }` for every
+video ffmpeg can read (`web` is the web copy's file name in `gg/`, or null
+until it is made; `width` and `height` are the displayed size) and
+`videoAtlasDir` (`video_<id>`, or null while there is no atlas). The folder
+page sets `videos` and `videoAtlas` (the `_video.json` contents plus `dir`)
+next to `spriteMeta`. The build-status poll (`?build-status`) keeps its
+meaning for the stills and adds a `video` object: whether video work is
+running, how many clips, mosaics and web copies are queued, whether the
+atlas is ready, and how many web copies of how many videos are done.
+
+Static files, the web copies, mosaics and originals included, answer HTTP
+range requests (`Range: bytes=...`, 206 and 416, `If-Range`), which
+browsers need to play and seek video.
+
+### Cost
+
+Measured on a 16-thread container (one Proxmox LXC):
+
+- A folder of 150 short synthetic videos (3 to 6 s, five shapes from 4:1 to
+  9:16): stills browsable after 42 s, video atlas after 161 s (clips 29 s,
+  four mosaics 89 s), web copies a few seconds later (they were already
+  H.264, so copied). Mosaics: h50 3812x232 6.5 MB, h100 3838x864 24 MB,
+  h200 3822x2080 58 MB and 3548x1040 27 MB; the clips took 46 MB in `gg/`.
+  The test pattern is far busier than real video; mosaics are capped at
+  CRF 26 and 8 Mbit/s for a full 4K sheet, so a full sheet is at most about
+  60 MB, and real footage usually stays well below the cap.
+- Real clips (Big Buck Bunny, Sintel, Tears of Steel and others, 26 files
+  in 12 containers): 12 clips of 3 to 90 s gave mosaics of 1.5 MB (h50),
+  3.8 MB (h100) and 10 MB (h200, 3360x416); preview clips take about 2 MB
+  per video.
+- A web copy costs a full decode and H.264 encode of the video (`-preset
+  medium -crf 21`) unless it can be copied: an 11-minute 1024x576 MPEG-4
+  AVI took 115 s, 10 s of 1080p HEVC or AV1 about 11 s (with two other
+  encodes running), while a 10-minute 1080p H.264 MP4 was copied in 24 s
+  (its sound converted to stereo). Disk: about the size of a 1080p H.264
+  file of the same length per video, plus the clips and the mosaics.
+- ffprobe runs on every video at every rebuild of its folder that finds it
+  new or changed; a poster costs a few seconds of decoding.
+
+### Limits
+
+- No security review. ffmpeg parses every video, uploaded ones included,
+  with the local-file protocol only and only real video container demuxers
+  allowed (no playlists, concat or image sequences), but its decoders are
+  still a large attack surface.
+- HDR is tone-mapped with a fixed curve (hable); Dolby Vision profiles
+  without an HDR10 base layer are not handled specially.
+- Subtitles, chapters, extra audio tracks and metadata are not carried
+  into the web copy (only the first audio track, downmixed to stereo).
+- The browser side of the moving previews is not part of this server
+  work; `public/gallery.js` shows videos as their posters, and opening one
+  shows the poster, not the web copy, until the viewer is updated.
 
 ## Admin page
 
@@ -199,6 +324,10 @@ the originals:
 <folder>/gg/<image>.jpg.h200.avif     per-image renditions, AVIF (h200..h1600)
 <folder>/gg/<image>.jpg.h5.v          small lossless copies, the atlas input (h5..h100)
 <folder>/gg/atlas_<id>/               sprite atlases + imagemap for this build
+<folder>/gg/<video>.mp4.v100.mp4      a video's preview clip for one tier (atlas input)
+<folder>/gg/<video>.mp4.web.mp4       a video's playable copy
+<folder>/gg/video_<id>/               the video atlas: mosaic-h<H>-<N>.mp4 + _video.json
+<folder>/gg/_videos.json              what ffprobe said about each video, what is made
 <folder>/gg/_manifest.json            the committed listing a pageview renders from
 <folder>/gg/_sources.json             size and time of each photo at the last build
 <folder>/gg/_placeholders.json        photos shown as placeholders, and why
@@ -221,7 +350,7 @@ interrupted build never leaves a half-served gallery; it just rebuilds.
 ## Configuration
 
 Environment variables, all optional. For the systemd service, put them in
-`/etc/goodgallery.env`, one `VARIABLE=value` per line (lines starting with
+`/etc/ggvideo.env`, one `VARIABLE=value` per line (lines starting with
 `#` are comments; no `export`), for example:
 
 ```sh
@@ -238,9 +367,9 @@ is refused as ambiguous).
 |---|---|---|
 | `PORT` | `3000` | Listen port (1 to 65535) |
 | `HOST` | `0.0.0.0` | Listen address |
-| `GALLERIES_ROOT` | `/var/lib/goodgallery/galleries` | Root of the gallery tree; everything in it is public |
-| `STATE_DIR` | `/var/lib/goodgallery` | Passkey, sessions, server-made login links, in-progress uploads, placeholder tiles. Must not be inside `GALLERIES_ROOT` |
-| `SITE_TITLE` | `Goodgallery` | Shown in the page title and breadcrumb |
+| `GALLERIES_ROOT` | `/var/lib/ggvideo/galleries` | Root of the gallery tree; everything in it is public |
+| `STATE_DIR` | `/var/lib/ggvideo` | Passkey, sessions, server-made login links, in-progress uploads, placeholder tiles. Must not be inside `GALLERIES_ROOT` |
+| `SITE_TITLE` | `ggvideo` | Shown in the page title and breadcrumb |
 | `BUILD_CONCURRENCY` | CPU count | Parallel vips processes during builds (each runs at nice 10); `0` means CPU count |
 | `MAX_SPRITE_BYTES` | `4MiB` | Target size of one atlas image (64 KiB to 64 MiB) |
 | `BYTES_PER_PIXEL` | `0.30` | Estimated AVIF bytes per pixel, used to size atlases |
@@ -252,8 +381,15 @@ is refused as ambiguous).
 | `CHUNK_SIZE` | `16MiB` | Upload chunk size (64 KiB to 1 GiB) |
 | `MAX_UPLOAD_BYTES` | `64GiB` | Largest file the uploader accepts |
 | `VIPS_CONCURRENCY` | `1` | Threads inside each vips process. Builds run several processes instead (`BUILD_CONCURRENCY`) |
+| `VIDEO_PREVIEW_SECONDS` | `60` | Length of every mosaic, and of the part of each video it shows (2 to 600) |
+| `VIDEO_PREVIEW_FPS` | `24` | Frame rate of the mosaics (1 to 30) |
+| `VIDEO_TIERS` | `50,100,200` | Tile heights of the video atlas, even, 16 to 1080, at most six |
+| `VIDEO_SHEET_MAX_TILES` | `450` | Most tiles in one mosaic (one ffmpeg opens this many clips at once) |
+| `VIDEO_WEB_MAX_HEIGHT` | `1080` | Short side of the web copy at most (the long side at most 16:9 of it); never upscaled |
+| `VIDEO_BUILD_CONCURRENCY` | CPUs / 4, 2 to 8 | ffmpeg processes at once for clips, mosaics and web copies (each at nice 10, each multi-threaded); `0` means the default |
+| `FFMPEG_TIMEOUT_SECONDS` | `14400` | An ffmpeg run longer than this is stopped and its video's clips or web copy counted as failed (a rescan tries again) |
 | `GG_DEBUG_BUILDS` | unset | Any value logs a line for every photo the build queue looks at |
-| `GG_ENV_FILE` | `/etc/goodgallery.env` | The settings file `login-link` reads (the unit's `EnvironmentFile=` must name the same file) |
+| `GG_ENV_FILE` | `/etc/ggvideo.env` | The settings file `login-link` reads (the unit's `EnvironmentFile=` must name the same file) |
 
 ## Layout of the code
 
@@ -273,6 +409,12 @@ is refused as ambiguous).
   `lib/build_queue.js`, `lib/placeholders.js` (which photos are shown as
   placeholders, and why) and `lib/atlas.js` (atlases, baked in
   `lib/sprite_worker.js`).
+- Video: `lib/ffmpeg.js` starts every ffmpeg and ffprobe (timeouts,
+  shutdown, the startup check); `lib/videos.js` is one video's files
+  (probe, poster, preview clips, web copy, the `_videos.json` record);
+  `lib/video_atlas.js` lays out and encodes the mosaics and documents
+  `_video.json`; `lib/video_stage.js` runs the video work of each folder
+  after its stills are committed.
 - `lib/auth.js`, `lib/webauthn.js` and `lib/admin_api.js` handle the passkey
   admin; `lib/upload.js` the chunked uploader; `lib/trash.js` the trash;
   `lib/place.js` puts a file under a name without replacing one that is
