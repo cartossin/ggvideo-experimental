@@ -1,10 +1,12 @@
 # Security
 
-To report a vulnerability, use GitHub's private reporting form:
+**ggvideo-experimental has had no security review.** It is an experiment,
+not a release. It runs ffmpeg on every video in the galleries, uploaded ones
+included, and nothing about that is sandboxed. Do not expose it to untrusted
+users or untrusted files.
+
+There is no security support for this fork: no advisories, no fix
+schedule. If you find a problem you are welcome to open an issue here. If the
+problem is also in upstream Goodgallery (the photo gallery this is forked
+from), please report it there privately instead:
 https://github.com/cartossin/goodgallery/security/advisories/new
-
-Please do not open a public issue for a security problem. Include the
-version (shown next to "Admin" on the admin page, or in `package.json`) and
-the steps to reproduce it.
-
-Fixes go into the latest release only.

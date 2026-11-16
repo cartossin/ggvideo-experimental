@@ -270,7 +270,7 @@ browsers need to play and seek video.
 
 ### Cost
 
-Measured on a 16-thread container (one Proxmox LXC):
+Measured on a 16-thread Linux container:
 
 - A folder of 150 short synthetic videos (3 to 6 s, five shapes from 4:1 to
   9:16): stills browsable after 42 s, video atlas after 161 s (clips 29 s,
