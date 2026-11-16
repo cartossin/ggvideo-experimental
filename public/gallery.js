@@ -1579,6 +1579,15 @@
       }
     }
 
+    // Dynamic batches with partly transparent textures (the video badges),
+    // blended over what is already drawn. Every other draw is opaque.
+    function drawBlended(batches) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      drawDynamic(batches);
+      gl.disable(gl.BLEND);
+    }
+
     function hasTexture(key) { return textures.has(key); }
 
     return {
@@ -1589,7 +1598,7 @@
       uploadStatic: uploadStatic, dropStatic: dropStatic,
       releaseAllStatic: releaseAllStatic, hasStatic: hasStatic,
       beginFrame: beginFrame, beginOverlay: beginOverlay,
-      drawStatic: drawStatic, drawDynamic: drawDynamic,
+      drawStatic: drawStatic, drawDynamic: drawDynamic, drawBlended: drawBlended,
       hasTexture: hasTexture,
     };
   })();
@@ -2016,6 +2025,7 @@
     if (atlasH != null) drawGridFromAtlas(atlasH, W, dpr);
     else drawGridPerImage(W, dpr, scrollY, viewportH);
     movingTiles.afterGridDraw();
+    videoBadges.drawForBuffer();
     requestFloorSprites();
   }
 
@@ -2255,6 +2265,145 @@
     return 0;
   }
 
+  // ---- video badges ----------------------------------------------------
+  // A quiet marker on each video tile big enough for one, so a poster
+  // reads as a video: a play triangle and the duration, white on
+  // translucent black, in the tile's bottom-left corner; a tile too narrow
+  // for the duration gets the triangle alone. Drawn on the GPU like the
+  // tiles: one small glyph sheet (a 2D canvas holding the triangle, the
+  // digits, ':' and a patch of the background) is a texture, and a badge
+  // is a few blended quads from it.
+  var videoBadges = (function () {
+    var BADGE_H = 16;        // CSS px
+    var INSET = 4;           // from the tile's left and bottom edges
+    var PAD = 4;             // inside the badge, left and right
+    var TRIANGLE_W = 7;
+    var GAP = 3;             // between the triangle and the duration
+    var FONT_PX = 11;
+    var CHARACTERS = '0123456789:';
+    var CELL_SPACING = 3;    // transparent sheet px between glyphs, so filtering never mixes two
+    var TEXTURE_KEY = 'video-badges';
+    var glyphs = null;       // { scale, canvas, width, height, cells: { name: { x, w } } }, sheet px
+
+    function anyVideos() { return !!window.videos && Object.keys(window.videos).length > 0; }
+    function isVideo(name) { return !!window.videos && Object.prototype.hasOwnProperty.call(window.videos, name); }
+
+    // The glyph sheet at `scale` sheet px per CSS px (the device pixel
+    // ratio, so badges are sharp).
+    function buildGlyphSheet(scale) {
+      var font = '600 ' + (FONT_PX * scale) + 'px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+      var measure = document.createElement('canvas').getContext('2d');
+      measure.font = font;
+      var cells = {};
+      var x = CELL_SPACING;
+      function addCell(name, width) { cells[name] = { x: x, w: width }; x += width + CELL_SPACING; }
+      addCell('background', 4 * scale);
+      addCell('triangle', Math.ceil(TRIANGLE_W * scale));
+      for (var i = 0; i < CHARACTERS.length; i++) addCell(CHARACTERS[i], Math.ceil(measure.measureText(CHARACTERS[i]).width));
+      var canvas = document.createElement('canvas');
+      canvas.width = x;
+      canvas.height = Math.ceil(BADGE_H * scale);
+      var ctx = canvas.getContext('2d');
+      var h = canvas.height;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(cells.background.x, 0, cells.background.w, h);
+      ctx.fillStyle = '#fff';
+      var triangle = cells.triangle;
+      ctx.beginPath();
+      ctx.moveTo(triangle.x, h / 2 - 4 * scale);
+      ctx.lineTo(triangle.x + triangle.w, h / 2);
+      ctx.lineTo(triangle.x, h / 2 + 4 * scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = font;
+      ctx.textBaseline = 'middle';
+      for (var j = 0; j < CHARACTERS.length; j++) ctx.fillText(CHARACTERS[j], cells[CHARACTERS[j]].x, h / 2);
+      return { scale: scale, canvas: canvas, width: canvas.width, height: canvas.height, cells: cells };
+    }
+
+    // The glyph sheet for the current device pixel ratio, on the GPU.
+    function ensureTexture() {
+      var scale = devicePixelRatio();
+      if (!glyphs || glyphs.scale !== scale) {
+        glyphs = buildGlyphSheet(scale);
+        gridRenderer.deleteTexture(TEXTURE_KEY);
+      }
+      if (!gridRenderer.hasTexture(TEXTURE_KEY)) gridRenderer.uploadFrame(TEXTURE_KEY, glyphs.canvas, glyphs.width, glyphs.height);
+      return gridRenderer.hasTexture(TEXTURE_KEY);
+    }
+
+    // 75 -> "1:15", 3725 -> "1:02:05"; "" when the duration is unknown.
+    function durationText(seconds) {
+      if (!(seconds > 0)) return '';
+      var total = Math.max(1, Math.round(seconds));
+      var h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, s = total % 60;
+      var mm = h > 0 && m < 10 ? '0' + m : String(m);
+      return (h > 0 ? h + ':' : '') + mm + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    // One quad from glyph cell `cell` (the background patch is sampled
+    // away from its edges, so it stays solid when stretched).
+    function pushQuad(values, x, y, w, h, cell, inset) {
+      var u0 = (cell.x + inset) / glyphs.width, du = (cell.w - 2 * inset) / glyphs.width;
+      values.push(x, y - glOriginY, w, h, u0, 0, du, 1);
+    }
+
+    function pushBadge(values, t, dpr) {
+      var text = durationText(window.videos[t.name].duration);
+      var textW = 0;
+      for (var i = 0; i < text.length; i++) textW += glyphs.cells[text[i]].w / glyphs.scale;
+      var fullW = PAD + TRIANGLE_W + (text ? GAP + textW : 0) + PAD;
+      var triangleOnlyW = PAD + TRIANGLE_W + PAD;
+      if (t.h < BADGE_H + 2 * INSET) return;
+      var badgeW = t.w >= fullW + 2 * INSET ? fullW : t.w >= triangleOnlyW + 2 * INSET ? triangleOnlyW : 0;
+      if (!badgeW) return;
+      // On whole device pixels, so the glyphs are not smeared across two.
+      var x = Math.round((t.x + INSET) * dpr) / dpr;
+      var y = Math.round((t.y + t.h - INSET - BADGE_H) * dpr) / dpr;
+      pushQuad(values, x, y, badgeW, BADGE_H, glyphs.cells.background, 1);
+      var penX = x + PAD;
+      pushQuad(values, penX, y, TRIANGLE_W, BADGE_H, glyphs.cells.triangle, 0);
+      if (badgeW !== fullW) return;
+      penX += TRIANGLE_W + GAP;
+      for (var j = 0; j < text.length; j++) {
+        var cell = glyphs.cells[text[j]];
+        pushQuad(values, penX, y, cell.w / glyphs.scale, BADGE_H, cell, 0);
+        penX += cell.w / glyphs.scale;
+      }
+    }
+
+    // Instances of the badges of these tiles (the ones that are videos).
+    function instancesFor(tiles) {
+      if (!anyVideos() || !ensureTexture()) return new Float32Array(0);
+      var dpr = devicePixelRatio();
+      var values = [];
+      for (var i = 0; i < tiles.length; i++) {
+        if (isVideo(tiles[i].name)) pushBadge(values, tiles[i], dpr);
+      }
+      return new Float32Array(values);
+    }
+
+    // Called inside a frame whose state is bound (beginFrame/beginOverlay).
+    function draw(instances) {
+      if (instances.length && ensureTexture()) gridRenderer.drawBlended([{ textureKey: TEXTURE_KEY, instances: instances }]);
+    }
+
+    // Every badge in the canvas buffer; the end of a full grid draw.
+    function drawForBuffer() {
+      if (!anyVideos() || !canvasEl) return;
+      var tiles = [];
+      var bufferBottom = bufferTop + bufferH;
+      for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
+        if (lastTileRects[i].y > bufferBottom) break;
+        tiles.push(lastTileRects[i]);
+      }
+      var dpr = devicePixelRatio();
+      if (gridRenderer.beginOverlay(canvasEl.width / dpr, bufferH, bufferTop - glOriginY)) draw(instancesFor(tiles));
+    }
+
+    return { instancesFor: instancesFor, draw: draw, drawForBuffer: drawForBuffer };
+  })();
+
   // ---- moving tiles (the video atlas) ----------------------------------
   // The files are described at the top of lib/video_atlas.js. The preview
   // clips of a folder's videos are laid out in a few mosaic videos per tier
@@ -2361,7 +2510,8 @@
           rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
       }
       perSheet.forEach(function (entry, key) {
-        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instances: new Float32Array(entry.values) });
+        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instances: new Float32Array(entry.values),
+          badgeInstances: videoBadges.instancesFor(entry.tiles) });
       });
     }
 
@@ -2384,15 +2534,23 @@
 
     // ---- drawing ----
 
-    function drawSheets(keys) {
+    // Draws the current frames of these sheets over their tiles. withBadges:
+    // and the badges of those tiles again (the frame covered them); a full
+    // grid draw draws every badge once afterwards instead.
+    function drawSheets(keys, withBadges) {
       var batches = [];
+      var badgeInstances = [];
       keys.forEach(function (key) {
         var player = players.get(key);
         var entry = sheetsInBuffer.get(key);
-        if (player && player.hasFrame && entry) batches.push({ textureKey: textureKeyOf(key), instances: entry.instances });
+        if (!player || !player.hasFrame || !entry) return;
+        batches.push({ textureKey: textureKeyOf(key), instances: entry.instances });
+        if (withBadges) badgeInstances.push(entry.badgeInstances);
       });
       if (!batches.length || !lastDraw) return;
-      if (gridRenderer.beginOverlay(lastDraw.W, lastDraw.bufferH, lastDraw.topOffset)) gridRenderer.drawDynamic(batches);
+      if (!gridRenderer.beginOverlay(lastDraw.W, lastDraw.bufferH, lastDraw.topOffset)) return;
+      gridRenderer.drawDynamic(batches);
+      badgeInstances.forEach(videoBadges.draw);
     }
 
     function afterGridDraw() {
@@ -2402,7 +2560,7 @@
       collectSheetsInBuffer(dpr);
       // Sheets paused but not yet released still have their last frame:
       // drawn too, so a tile never steps back to its poster and forward again.
-      drawSheets(Array.from(sheetsInBuffer.keys()));
+      drawSheets(Array.from(sheetsInBuffer.keys()), false);
       updatePlayers();
     }
 
@@ -2563,7 +2721,7 @@
       var uploaded = performance.now();
       player.hasFrame = true;
       player.lastUploadedTime = video.currentTime;
-      drawSheets([player.key]);
+      drawSheets([player.key], true);
       counters.uploads++;
       counters.uploadMs += uploaded - started;
       counters.drawMs += performance.now() - uploaded;
