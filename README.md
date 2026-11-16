@@ -260,7 +260,8 @@ browsers need to play and seek video.
   yet, and a sheet that could not be loaded or decoded. The tiles move
   with `prefers-reduced-motion` too (it is often on for the system's own
   animations); only an opened video then waits for a click. Every video
-  tile big enough has a small badge, a play triangle; its duration is
+  tile at least 60 px high (and 40 wide) has a small badge, a play
+  triangle (smaller tiles would be swamped by it); its duration is
   added while the mouse is over the top controls' pull tab or the
   controls are revealed (not on touch screens).
 - **Opening a video** shows a native `<video controls>` over the poster, in

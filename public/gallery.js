@@ -2304,6 +2304,13 @@
     var PAD = 4;             // inside the badge, left and right
     var TRIANGLE_W = 7;
     var GAP = 3;             // between the triangle and the duration
+    // A badge only on a tile at least this big (CSS px): the 16 px badge
+    // is then at most about a quarter of the tile's height and the 15 px
+    // triangle badge under 40% of its width, a corner mark. On smaller
+    // tiles (a big folder at #fit, ~28 px) it would cover much of the
+    // picture; those tiles mark themselves by moving, if anything.
+    var MIN_TILE_H = 60;
+    var MIN_TILE_W = 40;
     var FONT_PX = 11;
     var CHARACTERS = '0123456789:';
     var CELL_SPACING = 3;    // transparent sheet px between glyphs, so filtering never mixes two
@@ -2387,7 +2394,7 @@
       for (var i = 0; i < text.length; i++) textW += glyphs.cells[text[i]].w / glyphs.scale;
       var fullW = PAD + TRIANGLE_W + (text ? GAP + textW : 0) + PAD;
       var triangleOnlyW = PAD + TRIANGLE_W + PAD;
-      if (t.h < BADGE_H + 2 * INSET) return;
+      if (t.h < MIN_TILE_H || t.w < MIN_TILE_W) return;
       var badgeW = t.w >= fullW + 2 * INSET ? fullW : t.w >= triangleOnlyW + 2 * INSET ? triangleOnlyW : 0;
       if (!badgeW) return;
       // On whole device pixels, so the glyphs are not smeared across two.
