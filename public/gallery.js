@@ -3649,13 +3649,7 @@
       // Tap: short in time AND in distance -> open original file. A quick
       // vertical swipe is short in time too, but it is not a tap.
       var dt = performance.now() - startT;
-      if (dt < 350 && farthestMove <= TAP_MAX_MOVE_PX) {
-        var name = images && images[focusedIdx];
-        if (name) {
-          var url = folderURL + encodeURIComponent(name);
-          window.location.href = url;
-        }
-      }
+      if (dt < 350 && farthestMove <= TAP_MAX_MOVE_PX) openOriginalOfShownPhoto();
     });
 
     mainEl.addEventListener('touchcancel', function () {
@@ -3668,9 +3662,18 @@
     // browsers fire after a touchend even when movement was non-trivial.
     mainEl.addEventListener('click', function () {
       if (performance.now() - lastDragEndAt < 400) return;
-      var name = images && images[focusedIdx];
-      if (name) window.location.href = folderURL + encodeURIComponent(name);
+      openOriginalOfShownPhoto();
     });
+  }
+
+  // A tap or click on the main image opens the photo's original file. Not
+  // for a video: the canvas around its player is only margin, and its
+  // original may be a format the browser just downloads; the player's
+  // "Download original" link is the way to it.
+  function openOriginalOfShownPhoto() {
+    var name = images && images[focusedIdx];
+    if (!name || isVideoName(name)) return;
+    window.location.href = folderURL + encodeURIComponent(name);
   }
 
   function renderGallery() {
