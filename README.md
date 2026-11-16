@@ -261,7 +261,8 @@ browsers need to play and seek video.
   with `prefers-reduced-motion` too (it is often on for the system's own
   animations); only an opened video then waits for a click. Every video
   tile big enough has a small badge, a play triangle; its duration is
-  added while the top controls are revealed (not on touch screens).
+  added while the mouse is over the top controls' pull tab or the
+  controls are revealed (not on touch screens).
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a

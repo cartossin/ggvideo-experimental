@@ -4107,11 +4107,17 @@
       var isTouchOnly = window.matchMedia('(hover: none)').matches;
       var isEmpty = !window.lastimagevalue;
 
-      // The video badges show durations only while the controls are
-      // revealed (videoBadges.setDurationsShown); never on touch screens.
+      // The video badges show their durations while the controls are
+      // revealed or a mouse pointer is over the pill (it is highlighted
+      // then); never on touch screens.
+      var mouseOverPill = false;
+      function updateVideoDurations() {
+        var revealed = document.body.classList.contains('controls-revealed');
+        videoBadges.setDurationsShown(!isTouchOnly && (revealed || mouseOverPill));
+      }
       function show() {
         document.body.classList.add('controls-revealed');
-        if (!isTouchOnly) videoBadges.setDurationsShown(true);
+        updateVideoDurations();
       }
       function hide() {
         // Empty galleries: drawer is locked open. Pill is hidden via CSS so
@@ -4119,7 +4125,7 @@
         // hideControls() calls become no-ops.
         if (isEmpty) return;
         document.body.classList.remove('controls-revealed');
-        videoBadges.setDurationsShown(false);
+        updateVideoDurations();
       }
       function toggle() {
         if (document.body.classList.contains('controls-revealed')) hide();
@@ -4144,6 +4150,16 @@
           var d = Math.hypot(e.clientX - cx, e.clientY - cy);
           if (d < REVEAL_RADIUS) document.body.classList.add('pill-near');
           else document.body.classList.remove('pill-near');
+        });
+        pill.addEventListener('pointerenter', function (e) {
+          if (e.pointerType !== 'mouse') return;
+          mouseOverPill = true;
+          updateVideoDurations();
+        });
+        pill.addEventListener('pointerleave', function (e) {
+          if (e.pointerType !== 'mouse') return;
+          mouseOverPill = false;
+          updateVideoDurations();
         });
       }
 
