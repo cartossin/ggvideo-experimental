@@ -13,8 +13,6 @@ exactly like a photo), then as a moving preview: all of a folder's previews
 are packed into a few mosaic videos per size, which the viewer plays once
 and cuts into tiles, the way the still grid uses sprite atlases. Opening a
 video plays a browser-friendly copy (H.264 + AAC). See [Video](#video).
-The browser side of the moving previews is being written separately; this
-server already hands the page everything it needs.
 
 ## Goodgallery
 
@@ -249,6 +247,26 @@ Static files, the web copies, mosaics and originals included, answer HTTP
 range requests (`Range: bytes=...`, 206 and 416, `If-Range`), which
 browsers need to play and seek video.
 
+### In the browser
+
+- **Grid.** Each mosaic sheet with a tile on screen plays in one hidden,
+  muted, looping `<video>`; every new frame is uploaded to a WebGL texture
+  and that sheet's tiles are drawn over their posters (the drawing buffer
+  is kept, so a frame does not redraw the grid). The tier is chosen per
+  tile from its height in device pixels, like the per-photo tiers. At most
+  4 sheets play and 8 are kept; a sheet off screen pauses at once and is
+  freed after 15 s. Posters stay where nothing plays: tiles under 24
+  device pixels, `prefers-reduced-motion`, a hidden page, the photo view,
+  a video not in the atlas yet, and a sheet that could not be loaded or
+  decoded. Every video tile big enough has a small badge: a play triangle
+  and its duration.
+- **Opening a video** shows a native `<video controls>` over the poster, in
+  the box a photo would fill, playing the web copy (with sound, if the
+  browser lets the page start it; otherwise it waits for a click), and a
+  "Download original" link. Without a web copy yet, the poster and a note
+  stay until the build-status poll finds it. Arrows, the film strip,
+  Escape and history work as for photos; leaving stops playback.
+
 ### Cost
 
 Measured on a 16-thread container (one Proxmox LXC):
@@ -284,9 +302,10 @@ Measured on a 16-thread container (one Proxmox LXC):
   without an HDR10 base layer are not handled specially.
 - Subtitles, chapters, extra audio tracks and metadata are not carried
   into the web copy (only the first audio track, downmixed to stereo).
-- The browser side of the moving previews is not part of this server
-  work; `public/gallery.js` shows videos as their posters, and opening one
-  shows the poster, not the web copy, until the viewer is updated.
+- The viewer's video side has been tested in headless Chromium with
+  software rendering only, not yet on real GPUs, Safari or Firefox. A
+  swipe on the playing video itself goes to the native player, not the
+  film strip (the strip and the arrows still move between items).
 
 ## Admin page
 
