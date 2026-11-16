@@ -260,7 +260,8 @@ browsers need to play and seek video.
   yet, and a sheet that could not be loaded or decoded. The tiles move
   with `prefers-reduced-motion` too (it is often on for the system's own
   animations); only an opened video then waits for a click. Every video
-  tile big enough has a small badge: a play triangle and its duration.
+  tile big enough has a small badge, a play triangle; its duration is
+  added while the top controls are revealed (not on touch screens).
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a
@@ -270,7 +271,7 @@ browsers need to play and seek video.
 
 ### Cost
 
-Measured on a 16-thread Linux container:
+Measured on a 16-thread container (one Proxmox LXC):
 
 - A folder of 150 short synthetic videos (3 to 6 s, five shapes from 4:1 to
   9:16): stills browsable after 42 s, video atlas after 161 s (clips 29 s,

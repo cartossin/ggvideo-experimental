@@ -2289,9 +2289,12 @@
 
   // ---- video badges ----------------------------------------------------
   // A quiet marker on each video tile big enough for one, so a poster
-  // reads as a video: a play triangle and the duration, white on
-  // translucent black, in the tile's bottom-left corner; a tile too narrow
-  // for the duration gets the triangle alone. Drawn on the GPU like the
+  // reads as a video: a play triangle, white on translucent black, in the
+  // tile's bottom-left corner. The duration is added after it only while
+  // the top controls are revealed (body.controls-revealed, set by
+  // setupAutoHide), never on a touch screen, and only where it fits.
+  // Showing or hiding the durations is one full grid draw, which builds
+  // every badge again (playing sheets included). Drawn on the GPU like the
   // tiles: one small glyph sheet (a 2D canvas holding the triangle, the
   // digits, ':' and a patch of the background) is a texture, and a badge
   // is a few blended quads from it.
@@ -2306,6 +2309,14 @@
     var CELL_SPACING = 3;    // transparent sheet px between glyphs, so filtering never mixes two
     var TEXTURE_KEY = 'video-badges';
     var glyphs = null;       // { scale, canvas, width, height, cells: { name: { x, w } } }, sheet px
+    var durationsShown = false;
+
+    // Called when the top controls are revealed or hidden.
+    function setDurationsShown(shown) {
+      if (shown === durationsShown) return;
+      durationsShown = shown;
+      if (anyVideos() && canvasEl) scheduleGridRedraw();
+    }
 
     function anyVideos() { return !!window.videos && Object.keys(window.videos).length > 0; }
     function isVideo(name) { return !!window.videos && Object.prototype.hasOwnProperty.call(window.videos, name); }
@@ -2371,7 +2382,7 @@
     }
 
     function pushBadge(values, t, dpr) {
-      var text = durationText(window.videos[t.name].duration);
+      var text = durationsShown ? durationText(window.videos[t.name].duration) : '';
       var textW = 0;
       for (var i = 0; i < text.length; i++) textW += glyphs.cells[text[i]].w / glyphs.scale;
       var fullW = PAD + TRIANGLE_W + (text ? GAP + textW : 0) + PAD;
@@ -2385,7 +2396,7 @@
       pushQuad(values, x, y, badgeW, BADGE_H, glyphs.cells.background, 1);
       var penX = x + PAD;
       pushQuad(values, penX, y, TRIANGLE_W, BADGE_H, glyphs.cells.triangle, 0);
-      if (badgeW !== fullW) return;
+      if (badgeW !== fullW || !text) return;
       penX += TRIANGLE_W + GAP;
       for (var j = 0; j < text.length; j++) {
         var cell = glyphs.cells[text[j]];
@@ -2423,7 +2434,8 @@
       if (gridRenderer.beginOverlay(canvasEl.width / dpr, bufferH, bufferTop - glOriginY)) draw(instancesFor(tiles));
     }
 
-    return { instancesFor: instancesFor, draw: draw, drawForBuffer: drawForBuffer };
+    return { instancesFor: instancesFor, draw: draw, drawForBuffer: drawForBuffer,
+      setDurationsShown: setDurationsShown };
   })();
 
   // ---- moving tiles (the video atlas) ----------------------------------
@@ -4095,13 +4107,19 @@
       var isTouchOnly = window.matchMedia('(hover: none)').matches;
       var isEmpty = !window.lastimagevalue;
 
-      function show() { document.body.classList.add('controls-revealed'); }
+      // The video badges show durations only while the controls are
+      // revealed (videoBadges.setDurationsShown); never on touch screens.
+      function show() {
+        document.body.classList.add('controls-revealed');
+        if (!isTouchOnly) videoBadges.setDurationsShown(true);
+      }
       function hide() {
         // Empty galleries: drawer is locked open. Pill is hidden via CSS so
         // users can't accidentally collapse it, and intent-based
         // hideControls() calls become no-ops.
         if (isEmpty) return;
         document.body.classList.remove('controls-revealed');
+        videoBadges.setDurationsShown(false);
       }
       function toggle() {
         if (document.body.classList.contains('controls-revealed')) hide();
