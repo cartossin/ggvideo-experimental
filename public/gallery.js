@@ -779,6 +779,8 @@
     viewer: function () {
       return { focusedIdx: focusedIdx, commandedIdx: commandedIdx, chasing: focusChaseRaf !== null };
     },
+    // The grid's video sheets: which play, which have a frame on the GPU.
+    movingTiles: function () { return movingTiles.stats(); },
     // Scroll mapping: layout height, spacer height, ratio, the layout y at
     // the viewport top and the photo whose row is there.
     layout: function () {
@@ -1419,6 +1421,35 @@
       return true;
     }
 
+    // A texture from a <video> (its current frame) or a <canvas>, width x
+    // height pixels, written in place by later calls with the same key (a
+    // video's frames). An ImageBitmap ignores UNPACK_FLIP_Y_WEBGL, which
+    // init() turns on; these sources obey it, so it is off for this upload:
+    // the source's top row is v = 0, as in every atlas sheet. False if the
+    // GPU cannot take a texture that size.
+    function uploadFrame(key, source, width, height) {
+      if (!available() || !width || !height) return false;
+      if (width > maxTextureSize || height > maxTextureSize) return false;
+      var existing = textures.get(key);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      if (existing && existing.w === width && existing.h === height) {
+        gl.bindTexture(gl.TEXTURE_2D, existing.tex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      } else {
+        if (existing) gl.deleteTexture(existing.tex);
+        var tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        textures.set(key, { tex: tex, w: width, h: height });
+      }
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      return true;
+    }
+
     // The GPU dropped the context (driver reset, GPU switch). Every texture
     // and buffer went with it; forget them until the context comes back.
     function loseContext() {
@@ -1471,14 +1502,16 @@
     }
     function hasStatic(key) { return staticBuffers.has(key); }
 
-    function bindCommonState(viewportW, viewportH, dpr, topOffset) {
+    function bindCommonState(viewportW, viewportH, dpr, topOffset, clear) {
       // Chrome caps the drawing buffer when canvas dims exceed an internal GPU
       // memory budget. canvas.width/height stay at what we requested, but the
       // actual fb is smaller — gl.drawingBufferWidth/Height reflect reality.
       // Always viewport to the actual fb so content lands inside it.
       gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-      gl.clearColor(0.04, 0.04, 0.04, 1.0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      if (clear) {
+        gl.clearColor(0.04, 0.04, 0.04, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
       gl.useProgram(program);
       gl.uniform2f(locViewportPx, viewportW, viewportH);
       gl.uniform1f(locTopOffset, topOffset);
@@ -1499,7 +1532,16 @@
     // A frame is beginFrame() followed by any mix of drawStatic()/drawDynamic().
     function beginFrame(viewportW, viewportH, dpr, topOffset) {
       if (!available()) return false;
-      bindCommonState(viewportW, viewportH, dpr, topOffset);
+      bindCommonState(viewportW, viewportH, dpr, topOffset, true);
+      return true;
+    }
+
+    // Draws on top of what the canvas shows (the drawing buffer is
+    // preserved), without clearing: a new video frame repaints only the
+    // tiles of its own mosaic over the last full frame.
+    function beginOverlay(viewportW, viewportH, topOffset) {
+      if (!available()) return false;
+      bindCommonState(viewportW, viewportH, 1, topOffset, false);
       return true;
     }
 
@@ -1541,11 +1583,13 @@
 
     return {
       attach: attach, available: available, unsupported: unsupported, uploadSprite: uploadSprite,
+      uploadFrame: uploadFrame,
       maxTextureSide: maxTextureSide, loseContext: loseContext, restoreContext: restoreContext,
       releaseAll: releaseAll, deleteTexture: deleteTexture,
       uploadStatic: uploadStatic, dropStatic: dropStatic,
       releaseAllStatic: releaseAllStatic, hasStatic: hasStatic,
-      beginFrame: beginFrame, drawStatic: drawStatic, drawDynamic: drawDynamic,
+      beginFrame: beginFrame, beginOverlay: beginOverlay,
+      drawStatic: drawStatic, drawDynamic: drawDynamic,
       hasTexture: hasTexture,
     };
   })();
@@ -1703,6 +1747,7 @@
     });
     perImageTextures.clear();
     perImageTexturesRefused.clear();
+    movingTiles.forgetTextures();
     atlasInstancesBuiltFor = null;
   }
 
@@ -1713,6 +1758,7 @@
     e.preventDefault();
     gridRenderer.loseContext();
     perImageTextures.clear();
+    movingTiles.forgetTextures();
   }
   function onGridContextRestored() {
     if (!gridRenderer.restoreContext()) return;
@@ -1761,6 +1807,7 @@
     else { captureAnchorFromScroll(); hideControls(); }
     var thumbsEl = $('thumbs');
     if (!thumbsEl || !canvasEl) return;
+    movingTiles.onScroll();
     if (scrollScaled) { scheduleGridRedraw(); return; }  // pinned canvas: redraw every frame
     var scrollY = viewTop(thumbsEl);
     var viewportH = thumbsEl.clientHeight;
@@ -1968,6 +2015,7 @@
     var atlasH = pickAtlasHeight(currentRowHeight * dpr);
     if (atlasH != null) drawGridFromAtlas(atlasH, W, dpr);
     else drawGridPerImage(W, dpr, scrollY, viewportH);
+    movingTiles.afterGridDraw();
     requestFloorSprites();
   }
 
@@ -2206,6 +2254,359 @@
     }
     return 0;
   }
+
+  // ---- moving tiles (the video atlas) ----------------------------------
+  // The files are described at the top of lib/video_atlas.js. The preview
+  // clips of a folder's videos are laid out in a few mosaic videos per tier
+  // (h50/h100/h200), called sheets; each video's tile is a rectangle of one
+  // sheet, and every sheet loops the same 60 s. For each sheet with a tile
+  // on screen, one hidden, muted, looping <video> plays; each new frame is
+  // uploaded to a texture and drawn over the posters of that sheet's tiles,
+  // with the tile's rectangle as texture coordinates. The poster is the
+  // video's tile in the still pipeline, drawn by every full grid draw
+  // first, so it shows until a sheet's first frame is on the GPU, for a
+  // video the atlas does not have (window.videoAtlas.names), and wherever
+  // a sheet cannot play.
+  //
+  // A new frame does not redraw the grid: the drawing buffer is preserved,
+  // so only that sheet's tiles are drawn again over the last full frame.
+  //
+  // Public surface:
+  //   movingTiles.afterGridDraw()  end of every full grid draw: draw the
+  //                                frames there are, decide what plays
+  //   movingTiles.onScroll()       the viewport moved within the buffer
+  //   movingTiles.pauseAll()       the grid is not showing (photo view)
+  //   movingTiles.forgetTextures() a new or restored GL context
+  //   movingTiles.stats()          test hook
+  var movingTiles = (function () {
+    // Below this tile height (device px) a video stays a poster: the
+    // smallest tier, h50, would be drawn at under half its size, without
+    // mipmaps (they cannot be made for every frame), so the motion would
+    // shimmer, and at the smallest zooms a whole folder is on screen at
+    // once, so every sheet would be decoding for tiles a few pixels tall.
+    var MIN_MOVING_TILE_DEVICE_H = 24;
+    // At most this many sheets play at once (the ones with the most tiles
+    // on screen), and at most MAX_LIVE_SHEETS are kept at all, paused ones
+    // included: a decoder and a texture each, and a full 4K sheet's texture
+    // alone is 33 MB.
+    var MAX_PLAYING_SHEETS = 4;
+    var MAX_LIVE_SHEETS = 8;
+    // A paused sheet is kept this long, so scrolling back resumes it at
+    // once; then its element and texture are freed.
+    var RELEASE_AFTER_MS = 15000;
+
+    var atlas = window.videoAtlas && window.videoAtlas.tiers && window.videoAtlas.names ? window.videoAtlas : null;
+    var tierHeights = [];               // the atlas's tier heights, ascending
+    var atlasIndexByName = new Map();   // video name -> index into names and tiles
+    if (atlas) {
+      tierHeights = Object.keys(atlas.tiers).map(function (key) { return parseInt(key.slice(1), 10); })
+        .filter(function (h) { return h > 0; }).sort(function (a, b) { return a - b; });
+      atlas.names.forEach(function (name, index) { atlasIndexByName.set(name, index); });
+    }
+    var reducedMotionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+    var frameCallbackSupported = typeof HTMLVideoElement !== 'undefined' &&
+      'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
+    var players = new Map();       // sheet key ('h100:0') -> player, playing or paused
+    var failedSheets = new Set();  // sheets that could not play: posters for the page's life
+    // Per sheet with a tile in the canvas buffer, from the last full draw:
+    // sheet key -> { tiles: [layout rects], instances: Float32Array }.
+    var sheetsInBuffer = new Map();
+    // What the last full draw used, for drawing a sheet's tiles again.
+    var lastDraw = null;           // { W, bufferH, topOffset }
+    var framePumpRaf = null;       // without requestVideoFrameCallback: one loop for all sheets
+    var counters = { uploads: 0, uploadMs: 0, drawMs: 0 };
+
+    function sheetKey(tierHeight, sheetIndex) { return 'h' + tierHeight + ':' + sheetIndex; }
+    function textureKeyOf(key) { return 'video:' + key; }
+
+    // The tier for a tile drawn deviceH pixels tall: the smallest that
+    // covers it give or take TIER_UPSCALE_ALLOWED, as for the per-photo
+    // tiers; above the largest, the largest.
+    function tierForTileHeight(deviceH) {
+      for (var i = 0; i < tierHeights.length; i++) {
+        if (tierHeights[i] >= deviceH / TIER_UPSCALE_ALLOWED) return tierHeights[i];
+      }
+      return tierHeights[tierHeights.length - 1];
+    }
+
+    function motionAllowed() {
+      return !!canvasEl && focusedIdx === 0 && gridRenderer.available() &&
+        !(reducedMotionQuery && reducedMotionQuery.matches) && document.visibilityState !== 'hidden';
+    }
+
+    // ---- what the buffer shows ----
+
+    // Which sheet each video tile in the buffer is drawn from, and its
+    // instance (where on the canvas, which rectangle of the sheet).
+    function collectSheetsInBuffer(dpr) {
+      sheetsInBuffer = new Map();
+      var perSheet = new Map();
+      var bufferBottom = bufferTop + bufferH;
+      for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
+        var t = lastTileRects[i];
+        if (t.y > bufferBottom) break;
+        var atlasIndex = atlasIndexByName.get(t.name);
+        if (atlasIndex === undefined || t.h * dpr < MIN_MOVING_TILE_DEVICE_H) continue;
+        var tierHeight = tierForTileHeight(t.h * dpr);
+        var tier = atlas.tiers['h' + tierHeight];
+        var rect = tier.tiles[atlasIndex];   // [sheetIndex, x, y, width, height]
+        var sheet = rect && tier.sheets[rect[0]];
+        if (!sheet) continue;
+        var key = sheetKey(tierHeight, rect[0]);
+        var entry = perSheet.get(key);
+        if (!entry) { entry = { sheet: sheet, tiles: [], values: [] }; perSheet.set(key, entry); }
+        entry.tiles.push(t);
+        entry.values.push(t.x, t.y - glOriginY, t.w, t.h,
+          rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
+      }
+      perSheet.forEach(function (entry, key) {
+        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instances: new Float32Array(entry.values) });
+      });
+    }
+
+    // Sheet key -> how many of its tiles are on screen now.
+    function tilesOnScreenBySheet() {
+      var counts = new Map();
+      var thumbsEl = $('thumbs');
+      if (!thumbsEl) return counts;
+      var top = viewTop(thumbsEl), bottom = top + thumbsEl.clientHeight;
+      sheetsInBuffer.forEach(function (entry, key) {
+        var n = 0;
+        for (var i = 0; i < entry.tiles.length; i++) {
+          var t = entry.tiles[i];
+          if (t.y < bottom && t.y + t.h > top) n++;
+        }
+        if (n > 0) counts.set(key, n);
+      });
+      return counts;
+    }
+
+    // ---- drawing ----
+
+    function drawSheets(keys) {
+      var batches = [];
+      keys.forEach(function (key) {
+        var player = players.get(key);
+        var entry = sheetsInBuffer.get(key);
+        if (player && player.hasFrame && entry) batches.push({ textureKey: textureKeyOf(key), instances: entry.instances });
+      });
+      if (!batches.length || !lastDraw) return;
+      if (gridRenderer.beginOverlay(lastDraw.W, lastDraw.bufferH, lastDraw.topOffset)) gridRenderer.drawDynamic(batches);
+    }
+
+    function afterGridDraw() {
+      if (!atlas || !canvasEl) return;
+      var dpr = devicePixelRatio();
+      lastDraw = { W: canvasEl.width / dpr, bufferH: bufferH, topOffset: bufferTop - glOriginY };
+      collectSheetsInBuffer(dpr);
+      // Sheets paused but not yet released still have their last frame:
+      // drawn too, so a tile never steps back to its poster and forward again.
+      drawSheets(Array.from(sheetsInBuffer.keys()));
+      updatePlayers();
+    }
+
+    function onScroll() {
+      if (atlas && players.size + sheetsInBuffer.size > 0) updatePlayers();
+    }
+
+    // ---- which sheets play ----
+
+    function updatePlayers() {
+      if (!motionAllowed()) { pauseAll(); return; }
+      var counts = tilesOnScreenBySheet();
+      var wanted = Array.from(counts.keys()).filter(function (key) { return !failedSheets.has(key); })
+        .sort(function (a, b) { return counts.get(b) - counts.get(a); })
+        .slice(0, MAX_PLAYING_SHEETS);
+      var wantedSet = new Set(wanted);
+      players.forEach(function (player, key) { if (!wantedSet.has(key)) pausePlayer(player); });
+      wanted.forEach(function (key) {
+        var player = players.get(key) || createPlayer(key, sheetsInBuffer.get(key).sheet);
+        playPlayer(player);
+      });
+      releaseOldestPausedBeyondLimit();
+    }
+
+    function pauseAll() {
+      players.forEach(pausePlayer);
+      releaseOldestPausedBeyondLimit();
+    }
+
+    function releaseOldestPausedBeyondLimit() {
+      if (players.size <= MAX_LIVE_SHEETS) return;
+      var paused = Array.from(players.values()).filter(function (p) { return !p.wanted; })
+        .sort(function (a, b) { return a.pausedAt - b.pausedAt; });
+      for (var i = 0; i < paused.length && players.size > MAX_LIVE_SHEETS; i++) releasePlayer(paused[i]);
+    }
+
+    // ---- one sheet's player ----
+
+    function sheetURL(sheet) {
+      return folderURL + GG_DIR + '/' + encodeURIComponent(atlas.dir) + '/' + encodeURIComponent(sheet.file);
+    }
+
+    function createPlayer(key, sheet) {
+      var video = document.createElement('video');
+      // Properties for playing, attributes too: iOS Safari reads the
+      // attributes when deciding whether a video may play inline unasked.
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.setAttribute('muted', '');
+      video.setAttribute('playsinline', '');
+      video.preload = 'auto';
+      var player = { key: key, video: video, wanted: false, hasFrame: false, released: false,
+        frameRequest: null, lastUploadedTime: -1, pausedAt: 0, releaseTimer: null };
+      // A sheet that cannot be fetched or decoded shows posters; it is not
+      // asked for again, so a failure costs one request, not one per frame.
+      video.addEventListener('error', function () { failPlayer(player); });
+      video.src = sheetURL(sheet);
+      players.set(key, player);
+      return player;
+    }
+
+    function playPlayer(player) {
+      if (player.releaseTimer) { clearTimeout(player.releaseTimer); player.releaseTimer = null; }
+      if (player.wanted) return;
+      player.wanted = true;
+      var playing = player.video.play();
+      if (playing && playing.catch) {
+        playing.catch(function (error) {
+          // AbortError: paused again before it started, which is fine.
+          // Anything else (autoplay refused, as in a low-power mode, or no
+          // decoder for the file): this sheet stays posters.
+          if (error && error.name !== 'AbortError') failPlayer(player);
+        });
+      }
+      requestFrames(player);
+    }
+
+    function pausePlayer(player) {
+      if (!player.wanted) return;
+      player.wanted = false;
+      player.pausedAt = performance.now();
+      player.video.pause();
+      cancelFrameRequest(player);
+      player.releaseTimer = setTimeout(function () { releasePlayer(player); }, RELEASE_AFTER_MS);
+    }
+
+    // Frees the decoder (an element without a source holds none) and the
+    // texture. Tiles in the buffer that showed its last frame go back to
+    // their posters with a full redraw.
+    function releasePlayer(player) {
+      if (player.released) return;
+      player.released = true;
+      player.wanted = false;
+      if (player.releaseTimer) clearTimeout(player.releaseTimer);
+      player.releaseTimer = null;
+      cancelFrameRequest(player);
+      player.video.pause();
+      player.video.removeAttribute('src');
+      player.video.load();
+      gridRenderer.deleteTexture(textureKeyOf(player.key));
+      players.delete(player.key);
+      if (player.hasFrame && canvasEl) scheduleGridRedraw();
+      player.hasFrame = false;
+    }
+
+    function failPlayer(player) {
+      if (player.released) return;
+      failedSheets.add(player.key);
+      releasePlayer(player);
+    }
+
+    // ---- frames ----
+
+    function requestFrames(player) {
+      if (frameCallbackSupported) {
+        if (player.frameRequest === null) player.frameRequest = player.video.requestVideoFrameCallback(function () { onVideoFrame(player); });
+      } else if (framePumpRaf === null) {
+        framePumpRaf = requestAnimationFrame(pumpFramesWithoutCallback);
+      }
+    }
+
+    function cancelFrameRequest(player) {
+      if (player.frameRequest !== null) player.video.cancelVideoFrameCallback(player.frameRequest);
+      player.frameRequest = null;
+    }
+
+    function onVideoFrame(player) {
+      player.frameRequest = null;
+      if (!player.wanted) return;
+      showCurrentFrame(player);
+      requestFrames(player);
+    }
+
+    // Browsers without requestVideoFrameCallback: every animation frame,
+    // each playing sheet whose time moved has a new frame.
+    function pumpFramesWithoutCallback() {
+      framePumpRaf = null;
+      var anyPlaying = false;
+      players.forEach(function (player) {
+        if (!player.wanted) return;
+        anyPlaying = true;
+        if (player.video.currentTime !== player.lastUploadedTime) showCurrentFrame(player);
+      });
+      if (anyPlaying) framePumpRaf = requestAnimationFrame(pumpFramesWithoutCallback);
+    }
+
+    function showCurrentFrame(player) {
+      var video = player.video;
+      // HAVE_CURRENT_DATA: there is a frame to upload.
+      if (video.readyState < 2 || !canvasEl || !sheetsInBuffer.has(player.key)) return;
+      var started = performance.now();
+      if (!gridRenderer.uploadFrame(textureKeyOf(player.key), video, video.videoWidth, video.videoHeight)) {
+        // The GPU cannot take a texture this size: posters.
+        if (gridRenderer.available()) failPlayer(player);
+        return;
+      }
+      var uploaded = performance.now();
+      player.hasFrame = true;
+      player.lastUploadedTime = video.currentTime;
+      drawSheets([player.key]);
+      counters.uploads++;
+      counters.uploadMs += uploaded - started;
+      counters.drawMs += performance.now() - uploaded;
+    }
+
+    // A new GL context has no textures: each sheet shows its posters until
+    // its next frame is uploaded.
+    function forgetTextures() {
+      players.forEach(function (player) { player.hasFrame = false; player.lastUploadedTime = -1; });
+    }
+
+    // Motion preference or page visibility changed: the next full draw
+    // decides again (and puts posters back if motion stopped).
+    function onConditionsChanged() {
+      if (!motionAllowed()) pauseAll();
+      if (canvasEl) scheduleGridRedraw();
+    }
+    if (atlas) {
+      document.addEventListener('visibilitychange', onConditionsChanged);
+      if (reducedMotionQuery && reducedMotionQuery.addEventListener) {
+        reducedMotionQuery.addEventListener('change', function () {
+          // Reduced motion: free everything, not just pause.
+          if (reducedMotionQuery.matches) Array.from(players.values()).forEach(releasePlayer);
+          onConditionsChanged();
+        });
+      }
+    }
+
+    function stats() {
+      var list = [];
+      var textureBytes = 0;
+      players.forEach(function (player, key) {
+        list.push({ key: key, playing: player.wanted, hasFrame: player.hasFrame, time: player.video.currentTime });
+        if (player.hasFrame) textureBytes += player.video.videoWidth * player.video.videoHeight * 4;
+      });
+      return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
+        textureBytes: textureBytes, uploads: counters.uploads, uploadMs: counters.uploadMs, drawMs: counters.drawMs };
+    }
+
+    return { afterGridDraw: afterGridDraw, onScroll: onScroll, pauseAll: pauseAll,
+      forgetTextures: forgetTextures, stats: stats };
+  })();
+
   // ---- focus mode: main image + filmstrip ------------------------------
   // Layout: #thumbs (overflow:hidden, full viewport) holds #focus-main on top
   // and #focus-strip (the only scroll surface) below. Filmstrip tiles are
@@ -3038,6 +3439,8 @@
 
   function showPhotoView(photoIdx) {
     teardownPhotoView();
+    // The grid's canvas goes; its mosaics stop decoding.
+    movingTiles.pauseAll();
     focusedIdx = photoIdx;
     document.body.classList.add('image-view');
     document.body.classList.remove('thumb-view');
