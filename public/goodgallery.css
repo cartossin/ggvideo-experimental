@@ -198,6 +198,43 @@ html, body { overflow-x: hidden; }
 .zoom-control .zoom-label { min-width: 80px; text-align: center; color: var(--fg); }
 .zoom-control .zoom-back { padding: 4px 14px; }
 
+/* Photo view of a video (gallery.js openMainVideo): the native player over
+   the main canvas, in the box a photo would fill (JS sets left, top, width,
+   height), a note over it while it cannot play, and a link to the original
+   in the top-right corner, styled like the page's other notices. */
+.main-video {
+  position: absolute;
+  display: block;
+  object-fit: contain;
+  z-index: 2;
+}
+.main-video-note {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  max-width: calc(100% - 32px);
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: #262626;
+  color: #eee;
+  font-size: 14px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,.6);
+}
+.main-video-original {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(38,38,38,.85);
+  color: #eee;
+  font-size: 13px;
+}
+.main-video-original:hover { color: var(--accent); }
+
 /* Hidden folders (admin view only — see server.js sethidden endpoint). The
    little (hidden) tag and dimmed cell make them obvious without changing the
    click target's position. */

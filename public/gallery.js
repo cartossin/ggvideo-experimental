@@ -3,6 +3,7 @@
 // State injected by the server-rendered page:
 //   images = [null, "a.jpg", ...]  (1-indexed)
 //   lastimagevalue, isadmin, hasPasskey, folderURL, spriteMeta, imagemapURL
+//   videos, videoAtlas, webCopySuffix: see lib/page.js (null without videos)
 //   folderURL and imagemapURL are already %-encoded; use them as they are and
 //   encode every name added to them (encodeURIComponent).
 
@@ -343,6 +344,8 @@
     } else {
       setBuildMessage('');
     }
+    // An open video waiting for its web copy keeps the poller going.
+    checkAwaitedWebCopy(status);
   }
 
   // ---------- the page's build was replaced ----------
@@ -462,6 +465,8 @@
     rafPending = true;
     requestAnimationFrame(function () {
       rafPending = false;
+      // Laid out when the fullscreen ends (fullscreenchange, startjs).
+      if (videoIsFullscreen()) return;
       renderGallery();
       // Keep zoom-control disabled state synced with the dynamic sort
       // order — fit's effective height changes with the viewport.
@@ -781,6 +786,14 @@
     },
     // The grid's video sheets: which play, which have a frame on the GPU.
     movingTiles: function () { return movingTiles.stats(); },
+    // The video open in the photo view, or null.
+    mainVideo: function () {
+      if (!mainVideo) return null;
+      var element = mainVideo.element;
+      return { name: mainVideo.name, src: element.getAttribute('src'), currentTime: element.currentTime,
+        paused: element.paused, muted: element.muted, poster: element.poster,
+        note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
+    },
     // Scroll mapping: layout height, spacer height, ratio, the layout y at
     // the viewport top and the photo whose row is there.
     layout: function () {
@@ -3222,6 +3235,7 @@
     }
 
     prefetchFilmstripVisible(tier);
+    updateMainVideo();
   }
 
   // Keep per-image bitmaps for focusedIdx ± FOCUS_PREFETCH at `tier`; evict the rest.
@@ -3319,6 +3333,202 @@
     var bitmap = bitmaps[cell.spIdx];
     if (!bitmap) return null;
     return { bitmap: bitmap, sx: cell.sx, sy: cell.sy, sw: cell.sw, sh: cell.sh, natW: loc.w, natH: CANONICAL_H };
+  }
+
+  // ---- photo view: a video ---------------------------------------------
+  // An open video plays its web copy (H.264/AAC, made by the server) in a
+  // native <video controls>, laid over the main canvas in the box a photo
+  // of its shape fills. The canvas paints the poster under it as it does
+  // for a photo, and the element shows the same poster until it has a
+  // frame. The element is made only once the view has settled on the
+  // video, so a film strip moving past videos does not load each one.
+  // While a video has no web copy yet, the poster stays with a note, and
+  // the build-status poller looks for the copy (checkAwaitedWebCopy).
+  var MAIN_VIDEO_SETTLE_MS = 200;
+  var WEB_COPY_POLL_MS = 4000;
+  // Answers saying no video work is running before the page stops waiting
+  // for a web copy (the work may not have started yet for the first ones).
+  var WEB_COPY_IDLE_ANSWERS = 3;
+  var mainVideo = null;          // { name, element, note, originalLink, awaitingWebCopy, probing, idleAnswers }
+  var mainVideoTimer = null;     // waits for the view to settle on a video
+  var mainVideoTimerFor = null;  // the name it waits to open
+
+  function isVideoName(name) {
+    return !!name && !!window.videos && Object.prototype.hasOwnProperty.call(window.videos, name);
+  }
+  function webCopyURL(webName) { return folderURL + GG_DIR + '/' + encodeURIComponent(webName); }
+  function motionReduced() {
+    return !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  // Called by every drawMainImage: opens, keeps or closes the video.
+  function updateMainVideo() {
+    var name = focusedIdx > 0 ? images[focusedIdx] : null;
+    if (mainVideo && mainVideo.name !== name) stopMainVideo();
+    if (!isVideoName(name)) { cancelMainVideoTimer(); return; }
+    if (mainVideo) { placeMainVideo(); return; }
+    if (mainVideoTimerFor === name) return;
+    cancelMainVideoTimer();
+    mainVideoTimerFor = name;
+    mainVideoTimer = setTimeout(openMainVideoOnceSettled, MAIN_VIDEO_SETTLE_MS);
+  }
+
+  function cancelMainVideoTimer() {
+    if (mainVideoTimer) clearTimeout(mainVideoTimer);
+    mainVideoTimer = null;
+    mainVideoTimerFor = null;
+  }
+
+  function openMainVideoOnceSettled() {
+    var name = mainVideoTimerFor;
+    mainVideoTimer = null;
+    mainVideoTimerFor = null;
+    if (!mainEl || mainVideo || focusedIdx <= 0 || images[focusedIdx] !== name) return;
+    // The film strip is still on its way to the photo the visitor chose.
+    if (focusInProgrammaticScroll) { updateMainVideo(); return; }
+    openMainVideo(name);
+  }
+
+  function openMainVideo(name) {
+    var element = document.createElement('video');
+    element.className = 'main-video';
+    element.controls = true;
+    element.playsInline = true;
+    element.preload = 'auto';
+    element.poster = posterURLFor(name);
+    var note = document.createElement('div');
+    note.className = 'main-video-note';
+    note.setAttribute('role', 'status');
+    note.hidden = true;
+    var originalLink = document.createElement('a');
+    originalLink.className = 'main-video-original';
+    originalLink.href = folderURL + encodeURIComponent(name);
+    originalLink.download = name;
+    originalLink.textContent = 'Download original';
+    var opened = { name: name, element: element, note: note, originalLink: originalLink,
+      awaitingWebCopy: false, probing: false, idleAnswers: 0 };
+    mainVideo = opened;
+    element.addEventListener('error', function () {
+      // Only an error of the source this view gave it (stopMainVideo
+      // empties the element on the way out).
+      if (mainVideo === opened && element.getAttribute('src')) {
+        showMainVideoNote('This video cannot be played in this browser. Download the original to watch it.');
+      }
+    });
+    // iOS plays fullscreen in its own player; the view is laid out again
+    // when it closes, as it is after a page's fullscreen (startjs).
+    element.addEventListener('webkitendfullscreen', scheduleRender);
+    placeMainVideo();
+    var web = window.videos[name].web;
+    if (web) setMainVideoSource(webCopyURL(web));
+    else awaitWebCopy();
+  }
+
+  // The poster as the photo view would fetch it: the per-photo tier for
+  // the box (already in the HTTP cache once the main canvas has it).
+  function posterURLFor(name) {
+    var g = mainImageGeom();
+    var tier = pickPerImageTier(g ? g.dh * devicePixelRatio() : CANONICAL_H);
+    return folderURL + GG_DIR + '/' + encodeURIComponent(name) + '.h' + tier + '.avif' + tileQuery;
+  }
+
+  // Puts the element in the main image's box. Also after the view was
+  // rebuilt (a resize empties #thumbs): put back in the same task, the
+  // element is not paused (a media element removed from the page pauses
+  // only if it is still out of it once the task is done).
+  function placeMainVideo() {
+    var thumbsEl = $('thumbs');
+    var g = mainImageGeom();
+    if (!mainVideo || !thumbsEl || !g) return;
+    var parts = [mainVideo.element, mainVideo.note, mainVideo.originalLink];
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].parentNode !== thumbsEl) thumbsEl.appendChild(parts[i]);
+    }
+    var style = mainVideo.element.style;
+    style.left = g.dx + 'px';
+    style.top = g.dy + 'px';
+    style.width = g.dw + 'px';
+    style.height = g.dh + 'px';
+    mainVideo.note.style.top = (g.dy + g.dh / 2) + 'px';
+  }
+
+  function setMainVideoSource(url) {
+    var element = mainVideo.element;
+    mainVideo.note.hidden = true;
+    element.src = url;
+    // Sound is on unless the browser says otherwise. A browser that does
+    // not let a page start playing (no recent click, or a policy) refuses
+    // play(), and the poster and controls wait for a click. No autoplay
+    // for a visitor who asked for reduced motion.
+    if (motionReduced()) return;
+    var playing = element.play();
+    if (playing && playing.catch) playing.catch(function () {});
+  }
+
+  function showMainVideoNote(text) {
+    if (!mainVideo) return;
+    mainVideo.note.textContent = text;
+    mainVideo.note.hidden = false;
+  }
+
+  function awaitWebCopy() {
+    mainVideo.awaitingWebCopy = true;
+    showMainVideoNote('This video is still being prepared. It will play here when it is ready.');
+    watchBuildStatus();
+  }
+
+  // An answer of the build-status poller while the open video waits for
+  // its web copy. The answer counts web copies, not names, so the copy is
+  // looked for at its URL: the video's name + webCopySuffix in gg/ (the
+  // page has the suffix from the server, lib/videos.js). While the
+  // server's video work runs, the page keeps asking.
+  function checkAwaitedWebCopy(status) {
+    var awaited = mainVideo;
+    if (!awaited || !awaited.awaitingWebCopy || awaited.probing || !window.webCopySuffix) return;
+    var webName = awaited.name + window.webCopySuffix;
+    awaited.probing = true;
+    fetch(webCopyURL(webName), { method: 'HEAD', credentials: 'same-origin' })
+      .then(function (response) { return response.ok; }, function () { return false; })
+      .then(function (ready) {
+        awaited.probing = false;
+        if (mainVideo !== awaited) return;
+        if (ready) {
+          awaited.awaitingWebCopy = false;
+          window.videos[awaited.name].web = webName;
+          setMainVideoSource(webCopyURL(webName));
+          return;
+        }
+        var videoWorkRunning = !!(status && status.video && status.video.building);
+        awaited.idleAnswers = videoWorkRunning ? 0 : awaited.idleAnswers + 1;
+        if (awaited.idleAnswers >= WEB_COPY_IDLE_ANSWERS) {
+          awaited.awaitingWebCopy = false;
+          showMainVideoNote('This video is not ready to play. Reload the page later to try again.');
+          return;
+        }
+        if (!buildPoll.timer && !buildPoll.inFlight && !buildPoll.finished) scheduleBuildStatusPoll(WEB_COPY_POLL_MS);
+      });
+  }
+
+  // Leaving the video (another item, the grid): playback stops, and the
+  // element lets go of its download and decoder.
+  function stopMainVideo() {
+    cancelMainVideoTimer();
+    if (!mainVideo) return;
+    var closing = mainVideo;
+    mainVideo = null;
+    closing.element.pause();
+    closing.element.removeAttribute('src');
+    closing.element.load();
+    closing.element.remove();
+    closing.note.remove();
+    closing.originalLink.remove();
+  }
+
+  // A fullscreen video: the page must not lay the view out again, which
+  // would take the element out of the page and end the fullscreen.
+  function videoIsFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement ||
+      (mainVideo && mainVideo.element.webkitDisplayingFullscreen));
   }
 
   // 1-finger horizontal drag on the main image becomes a filmstrip scrub: we
@@ -3582,6 +3792,7 @@
   // refreshed last, after focusedIdx says which view is showing.
   function showGridView(levelIdx) {
     teardownPhotoView();
+    stopMainVideo();
     currentLevelIdx = levelIdx;
     lastGridLevelIdx = levelIdx;
     var lv = availableLevels()[levelIdx];
@@ -3597,6 +3808,7 @@
 
   function showPhotoView(photoIdx) {
     teardownPhotoView();
+    stopMainVideo();
     // The grid's canvas goes; its mosaics stop decoding.
     movingTiles.pauseAll();
     focusedIdx = photoIdx;
@@ -3784,6 +3996,10 @@
     // Programmatic key handlers; inline onkey* attributes hit a race with the
     // IIFE's window.* exports on Safari.
     window.addEventListener('keydown', keycheck);
+    // A video's fullscreen holds off the layout (scheduleRender); lay the
+    // view out once it ends, for any resize meanwhile.
+    document.addEventListener('fullscreenchange', scheduleRender);
+    document.addEventListener('webkitfullscreenchange', scheduleRender);
     watchBuildStatus();
   }
 
