@@ -2497,6 +2497,7 @@
       tierHeights = Object.keys(atlas.tiers).map(function (key) { return parseInt(key.slice(1), 10); })
         .filter(function (h) { return h > 0; }).sort(function (a, b) { return a - b; });
       atlas.names.forEach(function (name, index) { atlasIndexByName.set(name, index); });
+      if (!tierHeights.length) atlas = null;
     }
     var frameCallbackSupported = typeof HTMLVideoElement !== 'undefined' &&
       'requestVideoFrameCallback' in HTMLVideoElement.prototype;
@@ -2508,6 +2509,10 @@
     var sheetsInBuffer = new Map();
     // What the last full draw used, for drawing a sheet's tiles again.
     var lastDraw = null;           // { W, bufferH, topOffset }
+    // The tier the buffer's tiles are drawn from (chooseTier), null when
+    // the view stays posters; and the tier the tiles on screen wanted.
+    var chosenTier = null;
+    var idealTier = null;
     var framePumpRaf = null;       // without requestVideoFrameCallback: one loop for all sheets
     var counters = { uploads: 0, uploadMs: 0, drawMs: 0 };
 
@@ -2535,20 +2540,75 @@
 
     // ---- what the buffer shows ----
 
-    // Which sheet each video tile in the buffer is drawn from, and its
-    // instance (where on the canvas, which rectangle of the sheet).
-    function collectSheetsInBuffer(dpr) {
+    // Whether a tile drawn t.h CSS px tall is drawn from tierHeight at all.
+    function movesAt(t, tierHeight, dpr) { return t.h * dpr >= tierHeight / MAX_MINIFICATION; }
+
+    // The video tiles of the atlas on screen now: [{ t, atlasIndex }].
+    function videoTilesOnScreen() {
+      var found = [];
+      var thumbsEl = $('thumbs');
+      if (!thumbsEl) return found;
+      var top = viewTop(thumbsEl), bottom = top + thumbsEl.clientHeight;
+      for (var i = firstTileIndexAtOrBelow(top); i < lastTileRects.length; i++) {
+        var t = lastTileRects[i];
+        if (t.y >= bottom) break;
+        if (t.y + t.h <= top) continue;
+        var atlasIndex = atlasIndexByName.get(t.name);
+        if (atlasIndex !== undefined) found.push({ t: t, atlasIndex: atlasIndex });
+      }
+      return found;
+    }
+
+    // The sheets of a tier that these on-screen tiles would play; counting
+    // stops once there are more than `limit`.
+    function sheetsNeeded(onScreen, tierHeight, dpr, limit) {
+      var tiles = atlas.tiers['h' + tierHeight].tiles;
+      var sheets = new Set();
+      for (var i = 0; i < onScreen.length && sheets.size <= limit; i++) {
+        var rect = tiles[onScreen[i].atlasIndex];
+        if (rect && movesAt(onScreen[i].t, tierHeight, dpr)) sheets.add(rect[0]);
+      }
+      return sheets;
+    }
+
+    // One tier for every moving tile in view, so a zoom never decodes two
+    // tiers at once (rows stretched differently used to pick two). The
+    // ideal tier is the one the tallest video tile on screen wants. If the
+    // tiles on screen are spread over more of its sheets than can play at
+    // once, the next smaller tier is tried, and so on: a smaller tier
+    // packs more tiles per sheet, and motion everywhere beats sharpness.
+    // Only when even the smallest tier needs too many sheets does the view
+    // stay posters (chosen null). Returns { ideal, chosen }.
+    function chooseTier(onScreen, dpr) {
+      if (!onScreen.length) {
+        var forRows = tierForTileHeight(currentRowHeight * dpr);
+        return { ideal: forRows, chosen: forRows };
+      }
+      var tallest = 0;
+      for (var i = 0; i < onScreen.length; i++) tallest = Math.max(tallest, onScreen[i].t.h * dpr);
+      var ideal = tierForTileHeight(tallest);
+      for (var j = tierHeights.indexOf(ideal); j >= 0; j--) {
+        if (sheetsNeeded(onScreen, tierHeights[j], dpr, MAX_PLAYING_SHEETS).size <= MAX_PLAYING_SHEETS) {
+          return { ideal: ideal, chosen: tierHeights[j] };
+        }
+      }
+      return { ideal: ideal, chosen: null };
+    }
+
+    // Which sheet of the chosen tier each video tile in the buffer is drawn
+    // from, and its instance (where on the canvas, which rectangle of the
+    // sheet). Nothing when the view stays posters (tierHeight null).
+    function collectSheetsInBuffer(dpr, tierHeight) {
       sheetsInBuffer = new Map();
+      if (tierHeight === null) return;
+      var tier = atlas.tiers['h' + tierHeight];
       var perSheet = new Map();
       var bufferBottom = bufferTop + bufferH;
       for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         var atlasIndex = atlasIndexByName.get(t.name);
-        if (atlasIndex === undefined) continue;
-        var tierHeight = tierForTileHeight(t.h * dpr);
-        if (t.h * dpr < tierHeight / MAX_MINIFICATION) continue;
-        var tier = atlas.tiers['h' + tierHeight];
+        if (atlasIndex === undefined || !movesAt(t, tierHeight, dpr)) continue;
         var rect = tier.tiles[atlasIndex];   // [sheetIndex, x, y, width, height]
         var sheet = rect && tier.sheets[rect[0]];
         if (!sheet) continue;
@@ -2565,20 +2625,18 @@
       });
     }
 
-    // Sheet key -> how many of its tiles are on screen now.
-    function tilesOnScreenBySheet() {
+    // Sheet key -> how many of the on-screen tiles it draws, for the
+    // chosen tier.
+    function tilesOnScreenBySheet(onScreen, dpr) {
       var counts = new Map();
-      var thumbsEl = $('thumbs');
-      if (!thumbsEl) return counts;
-      var top = viewTop(thumbsEl), bottom = top + thumbsEl.clientHeight;
-      sheetsInBuffer.forEach(function (entry, key) {
-        var n = 0;
-        for (var i = 0; i < entry.tiles.length; i++) {
-          var t = entry.tiles[i];
-          if (t.y < bottom && t.y + t.h > top) n++;
-        }
-        if (n > 0) counts.set(key, n);
-      });
+      if (chosenTier === null) return counts;
+      var tiles = atlas.tiers['h' + chosenTier].tiles;
+      for (var i = 0; i < onScreen.length; i++) {
+        var rect = tiles[onScreen[i].atlasIndex];
+        if (!rect || !movesAt(onScreen[i].t, chosenTier, dpr)) continue;
+        var key = sheetKey(chosenTier, rect[0]);
+        if (sheetsInBuffer.has(key)) counts.set(key, (counts.get(key) || 0) + 1);
+      }
       return counts;
     }
 
@@ -2607,22 +2665,33 @@
       if (!atlas || !canvasEl) return;
       var dpr = devicePixelRatio();
       lastDraw = { W: canvasEl.width / dpr, bufferH: bufferH, topOffset: bufferTop - glOriginY };
-      collectSheetsInBuffer(dpr);
+      var onScreen = videoTilesOnScreen();
+      var choice = chooseTier(onScreen, dpr);
+      idealTier = choice.ideal;
+      chosenTier = choice.chosen;
+      collectSheetsInBuffer(dpr, chosenTier);
       // Sheets paused but not yet released still have their last frame:
       // drawn too, so a tile never steps back to its poster and forward again.
       drawSheets(Array.from(sheetsInBuffer.keys()), false);
-      updatePlayers();
+      updatePlayers(onScreen, dpr);
     }
 
+    // The viewport moved within the buffer. If what is on screen now asks
+    // for another tier, the buffer's tiles are collected again by a full
+    // draw; otherwise only which sheets play changes.
     function onScroll() {
-      if (atlas && players.size + sheetsInBuffer.size > 0) updatePlayers();
+      if (!atlas || !canvasEl) return;
+      var dpr = devicePixelRatio();
+      var onScreen = videoTilesOnScreen();
+      if (chooseTier(onScreen, dpr).chosen !== chosenTier) { scheduleGridRedraw(); return; }
+      updatePlayers(onScreen, dpr);
     }
 
     // ---- which sheets play ----
 
-    function updatePlayers() {
+    function updatePlayers(onScreen, dpr) {
       if (!motionAllowed()) { pauseAll(); return; }
-      var counts = tilesOnScreenBySheet();
+      var counts = tilesOnScreenBySheet(onScreen, dpr);
       var wanted = Array.from(counts.keys()).filter(function (key) { return !failedSheets.has(key); })
         .sort(function (a, b) { return counts.get(b) - counts.get(a); })
         .slice(0, MAX_PLAYING_SHEETS);
@@ -2798,6 +2867,7 @@
         if (player.hasFrame) textureBytes += player.video.videoWidth * player.video.videoHeight * 4;
       });
       return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
+        idealTier: idealTier, chosenTier: chosenTier,
         textureBytes: textureBytes, uploads: counters.uploads, uploadMs: counters.uploadMs, drawMs: counters.drawMs };
     }
 

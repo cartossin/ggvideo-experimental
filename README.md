@@ -252,8 +252,12 @@ browsers need to play and seek video.
 - **Grid.** Each mosaic sheet with a tile on screen plays in one hidden,
   muted, looping `<video>`; every new frame is uploaded to a WebGL texture
   and that sheet's tiles are drawn over their posters (the drawing buffer
-  is kept, so a frame does not redraw the grid). The tier is chosen per
-  tile from its height in device pixels, like the per-photo tiers. At most
+  is kept, so a frame does not redraw the grid). One tier serves every
+  tile in view: the one the tallest video tile on screen wants (by its
+  height in device pixels, like the per-photo tiers), or, when the tiles
+  on screen are spread over more of its sheets than can play at once, the
+  largest smaller tier whose sheets all can (motion everywhere beats
+  sharpness); posters only when even the smallest tier cannot. At most
   4 sheets play and 8 are kept; a sheet off screen pauses at once and is
   freed after 15 s. Posters stay where nothing plays: tiles under half
   the smallest tier's height in device pixels (no mipmaps, so no more
