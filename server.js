@@ -43,6 +43,10 @@ async function startServer() {
   preflightVips();
   const { preflightFfmpeg, stopFfmpegProcesses } = await import('./lib/ffmpeg.js');
   preflightFfmpeg();
+  // ffmpeg processes a killed previous run left behind (child_registry.js).
+  const { killLeftoverChildren } = await import('./lib/child_registry.js');
+  const leftovers = killLeftoverChildren();
+  if (leftovers) console.log(`[startup] stopped ${leftovers} ffmpeg process(es) a previous run left running`);
   const { stopAtlasWorker } = await import('./lib/atlas.js');
   const { stopMosaicWorkers } = await import('./lib/video_atlas.js');
   const { getPasskey, sessions } = await import('./lib/auth.js');
