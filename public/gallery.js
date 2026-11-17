@@ -2484,14 +2484,18 @@
     // A tier is drawn at no less than 1/MAX_MINIFICATION of its size: a
     // tile smaller than that (device px) stays a poster. The textures have
     // no mipmaps, and a LINEAR filter reads a 2x2 texel footprint, so up
-    // to 2x smaller every texel still counts and the motion stays clean;
-    // further down texels are skipped and it shimmers. Mipmaps are not the
-    // answer: making them for every frame of a 4K sheet costs a pass per
-    // frame and a third more memory, and the low levels would average
-    // neighbouring tiles together (the 4 px skirt covers two levels at
-    // most). So the floor follows the smallest tier the atlas has: 25 px
-    // tiles move down to 12.5 device px, an h50-only atlas down to 25.
-    var MAX_MINIFICATION = 2;
+    // to 2x smaller every texel still counts; further down texels are
+    // skipped and fine detail shimmers. That is accepted down to 4x,
+    // because the alternative is worse: with 10,000 videos fitted on a
+    // phone screen the tiles are about 12 device px tall, and at a 2x
+    // floor (12.5 px for the h25 tier) nothing moved there at all, while
+    // the same page moved on a laptop. Mipmaps are not the answer: making
+    // them for every frame of a 4K sheet costs a pass per frame and a
+    // third more memory, and the low levels would average neighbouring
+    // tiles together (the 4 px skirt covers two levels at most). So the
+    // floor follows the smallest tier the atlas has: 25 px tiles move
+    // down to 6.25 device px, an h50-only atlas down to 12.5.
+    var MAX_MINIFICATION = 4;
     // At most this many sheets play at once (the ones with the most tiles
     // on screen), and at most MAX_LIVE_SHEETS are kept at all, paused ones
     // included: a decoder and a texture each, and a full 4K sheet's texture
