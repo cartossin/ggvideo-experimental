@@ -2497,6 +2497,20 @@
   // A new frame does not redraw the grid: the drawing buffer is preserved,
   // so only that sheet's tiles are drawn again over the last full frame.
   //
+  // A tile taller than every tier (#size6, a big screen at #size5) plays
+  // its video's own web copy instead (gg/<name>.web.mp4, up to 1080p): one
+  // muted <video> per tile, looping the same first loopSeconds the mosaics
+  // show, uploaded and drawn exactly like a sheet with a single tile whose
+  // rectangle is the whole frame. So it is in the same place as the
+  // poster, scrolls and zooms with the grid by construction (no element
+  // over the canvas to keep in step), and the badges draw over it. So is a
+  // tile whose video the view's tier lacks (a tier may omit a video whose
+  // source is smaller than the tier; its web copy is then the sharpest
+  // there is). At most MAX_PLAYING_WEB_COPIES play, nearest the centre of
+  // the window first; posters beyond. A web copy decodes a whole video, so
+  // it is freed as soon as its tile leaves the screen or the grid, which
+  // also means the opened video's player never shares a file with one.
+  //
   // Public surface:
   //   movingTiles.afterGridDraw()  end of every full grid draw: draw the
   //                                frames there are, decide what plays
@@ -2540,6 +2554,8 @@
     // its tier wide; its width, not its height, decides the tier it needs.
     var WIDEST_TILE_ASPECT = 4;
     var MAX_LIVE_SHEETS = 8;
+    // Web copies playing in the grid at once (each up to a 1080p decoder).
+    var MAX_PLAYING_WEB_COPIES = 8;
     // A paused sheet is kept this long, so scrolling back resumes it at
     // once; then its element and texture are freed.
     var RELEASE_AFTER_MS = 15000;
@@ -2553,6 +2569,12 @@
       atlas.names.forEach(function (name, index) { atlasIndexByName.set(name, index); });
       if (!tierHeights.length) atlas = null;
     }
+    // Loops of a web copy in the grid: the first loopSeconds, as in the
+    // mosaics (VIDEO_PREVIEW_SECONDS on the server, 60 by default).
+    var loopSeconds = atlas && atlas.loopSeconds > 0 ? atlas.loopSeconds : 60;
+    var anyWebCopy = !!window.videos && Object.keys(window.videos).some(function (name) { return !!window.videos[name].web; });
+    // Without either there is nothing to move: every call below returns at once.
+    var active = !!atlas || anyWebCopy;
     var frameCallbackSupported = typeof HTMLVideoElement !== 'undefined' &&
       'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
@@ -2572,6 +2594,9 @@
     var staticBufferKeys = [];     // the GPU instance buffers of sheetsInBuffer
 
     function sheetKey(tierHeight, sheetIndex) { return 'h' + tierHeight + ':' + sheetIndex; }
+    function webCopyKey(name) { return 'web:' + name; }
+    function isWebCopyKey(key) { return key.indexOf('web:') === 0; }
+    function isVideoName(name) { return !!window.videos && Object.prototype.hasOwnProperty.call(window.videos, name); }
     function textureKeyOf(key) { return 'video:' + key; }
 
     // The tier for a tile drawn deviceH pixels tall: the smallest at
@@ -2609,7 +2634,8 @@
       return !!rect && deviceH >= tierHeight / MAX_MINIFICATION && tierForTileHeight(heightNeeded(t, dpr)) !== null;
     }
 
-    // The video tiles of the atlas on screen now: [{ t, atlasIndex }].
+    // The video tiles on screen now: [{ t, atlasIndex }], atlasIndex
+    // undefined for a video the atlas does not have (or with no atlas).
     function videoTilesOnScreen() {
       var found = [];
       var thumbsEl = $('thumbs');
@@ -2619,8 +2645,7 @@
         var t = lastTileRects[i];
         if (t.y >= bottom) break;
         if (t.y + t.h <= top) continue;
-        var atlasIndex = atlasIndexByName.get(t.name);
-        if (atlasIndex !== undefined) found.push({ t: t, atlasIndex: atlasIndex });
+        if (isVideoName(t.name)) found.push({ t: t, atlasIndex: atlasIndexByName.get(t.name) });
       }
       return found;
     }
@@ -2631,6 +2656,7 @@
       var tiles = atlas.tiers['h' + tierHeight].tiles;
       var sheets = new Set();
       for (var i = 0; i < onScreen.length && sheets.size <= limit; i++) {
+        if (onScreen[i].atlasIndex === undefined) continue;
         var rect = tiles[onScreen[i].atlasIndex];
         if (movesAt(onScreen[i].t, rect, tierHeight, dpr)) sheets.add(rect[0]);
       }
@@ -2648,12 +2674,14 @@
     // sheets does the view stay posters (chosen null). Returns
     // { ideal, chosen }; both null when no tile on screen fits a tier.
     function chooseTier(onScreen, dpr) {
+      if (!atlas) return { ideal: null, chosen: null };
       if (!onScreen.length) {
         var forRows = tierForTileHeight(currentRowHeight * dpr);   // none on screen: nothing plays anyway
         return { ideal: forRows, chosen: forRows };
       }
       var ideal = null;
       for (var i = 0; i < onScreen.length; i++) {
+        if (onScreen[i].atlasIndex === undefined) continue;
         var wanted = tierForTileHeight(heightNeeded(onScreen[i].t, dpr));
         if (wanted !== null && (ideal === null || wanted > ideal)) ideal = wanted;
       }
@@ -2675,14 +2703,17 @@
       var tier = tierHeight === null ? null : atlas.tiers['h' + tierHeight];
       var perSheet = new Map();
       var bufferBottom = bufferTop + bufferH;
-      for (var i = firstTileIndexAtOrBelow(bufferTop); tier && i < lastTileRects.length; i++) {
+      for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
+        if (!isVideoName(t.name)) continue;
         var atlasIndex = atlasIndexByName.get(t.name);
-        if (atlasIndex === undefined) continue;
-        var rect = tier.tiles[atlasIndex];   // [sheetIndex, x, y, width, height]
+        var rect = tier && atlasIndex !== undefined ? tier.tiles[atlasIndex] : null;   // [sheetIndex, x, y, width, height]
         var sheet = rect && tier.sheets[rect[0]];
-        if (!sheet || !movesAt(t, rect, tierHeight, dpr)) continue;
+        if (!sheet || !movesAt(t, rect, tierHeight, dpr)) {
+          if (playsWebCopy(t, rect, dpr)) addWebCopyTile(perSheet, t);
+          continue;
+        }
         var key = sheetKey(tierHeight, rect[0]);
         var entry = perSheet.get(key);
         if (!entry) { entry = { sheet: sheet, tiles: [], sources: [], values: [] }; perSheet.set(key, entry); }
@@ -2708,12 +2739,32 @@
           gridRenderer.uploadStatic(badgeKey, badges);
           staticBufferKeys.push(badgeKey);
         }
-        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, sources: entry.sources,
+        sheetsInBuffer.set(key, { sheet: entry.sheet, webName: entry.webName, tiles: entry.tiles, sources: entry.sources,
           instanceKey: instanceKey, badgeKey: badgeKey });
       });
       previousBuffers.forEach(function (bufferKey) {
         if (staticBufferKeys.indexOf(bufferKey) < 0) gridRenderer.dropStatic(bufferKey);
       });
+    }
+
+    // Whether a video tile not drawn from a mosaic plays its web copy: it is
+    // taller than every tier, or the view's tier does not have its video
+    // (an atlas without it at all included). Not while the view stays
+    // posters because too many sheets are on screen, and not before the
+    // copy exists.
+    function playsWebCopy(t, rect, dpr) {
+      if (!window.videos[t.name].web) return false;
+      if (tierForTileHeight(heightNeeded(t, dpr)) === null) return true;
+      return chosenTier !== null && !rect;
+    }
+
+    function addWebCopyTile(perSheet, t) {
+      var key = webCopyKey(t.name);
+      if (perSheet.has(key)) return;
+      // The whole frame, which has the poster's shape (the web copy is
+      // made at the video's displayed size, square pixels).
+      perSheet.set(key, { webName: window.videos[t.name].web, tiles: [t], sources: [null],
+        values: [t.x, t.y - glOriginY, t.w, t.h, 0, 0, 1, 1] });
     }
 
     // Sheet key -> how many of the on-screen tiles it draws, for the
@@ -2723,6 +2774,7 @@
       if (chosenTier === null) return counts;
       var tiles = atlas.tiers['h' + chosenTier].tiles;
       for (var i = 0; i < onScreen.length; i++) {
+        if (onScreen[i].atlasIndex === undefined) continue;
         var rect = tiles[onScreen[i].atlasIndex];
         if (!movesAt(onScreen[i].t, rect, chosenTier, dpr)) continue;
         var key = sheetKey(chosenTier, rect[0]);
@@ -2757,7 +2809,7 @@
     }
 
     function afterGridDraw() {
-      if (!atlas || !canvasEl) return;
+      if (!active || !canvasEl) return;
       var dpr = devicePixelRatio();
       lastDraw = { W: canvasEl.width / dpr, bufferH: bufferH, topOffset: bufferTop - glOriginY };
       var onScreen = videoTilesOnScreen();
@@ -2775,7 +2827,7 @@
     // for another tier, the buffer's tiles are collected again by a full
     // draw; otherwise only which sheets play changes.
     function onScroll() {
-      if (!atlas || !canvasEl) return;
+      if (!active || !canvasEl) return;
       var dpr = devicePixelRatio();
       var onScreen = videoTilesOnScreen();
       if (chooseTier(onScreen, dpr).chosen !== chosenTier) { scheduleGridRedraw(); return; }
@@ -2790,17 +2842,42 @@
       var wanted = Array.from(counts.keys()).filter(function (key) { return !failedSheets.has(key); })
         .sort(function (a, b) { return counts.get(b) - counts.get(a); })
         .slice(0, MAX_PLAYING_SHEETS);
+      wanted = wanted.concat(webCopiesToPlay(onScreen));
       var wantedSet = new Set(wanted);
-      players.forEach(function (player, key) { if (!wantedSet.has(key)) pausePlayer(player); });
+      players.forEach(function (player, key) { if (!wantedSet.has(key)) stopPlayer(player); });
       wanted.forEach(function (key) {
-        var player = players.get(key) || createPlayer(key, sheetsInBuffer.get(key).sheet);
+        var player = players.get(key) || createPlayer(key, sheetsInBuffer.get(key));
         playPlayer(player);
       });
       releaseOldestPausedBeyondLimit();
     }
 
+    // The web copies to play: tiles on screen that play theirs, nearest the
+    // window's centre first, at most MAX_PLAYING_WEB_COPIES.
+    function webCopiesToPlay(onScreen) {
+      var thumbsEl = $('thumbs');
+      if (!thumbsEl) return [];
+      var centreX = thumbsEl.clientWidth / 2, centreY = viewTop(thumbsEl) + thumbsEl.clientHeight / 2;
+      var candidates = [];
+      onScreen.forEach(function (item) {
+        var key = webCopyKey(item.t.name);
+        if (!sheetsInBuffer.has(key) || failedSheets.has(key)) return;
+        var dx = item.t.x + item.t.w / 2 - centreX, dy = item.t.y + item.t.h / 2 - centreY;
+        candidates.push({ key: key, distance: dx * dx + dy * dy });
+      });
+      candidates.sort(function (a, b) { return a.distance - b.distance; });
+      return candidates.slice(0, MAX_PLAYING_WEB_COPIES).map(function (c) { return c.key; });
+    }
+
+    // A sheet not wanted pauses (kept a while for scrolling back); a web
+    // copy is freed at once.
+    function stopPlayer(player) {
+      if (isWebCopyKey(player.key)) releasePlayer(player);
+      else pausePlayer(player);
+    }
+
     function pauseAll() {
-      players.forEach(pausePlayer);
+      Array.from(players.values()).forEach(stopPlayer);
       releaseOldestPausedBeyondLimit();
     }
 
@@ -2817,7 +2894,7 @@
       return folderURL + GG_DIR + '/' + encodeURIComponent(atlas.dir) + '/' + encodeURIComponent(sheet.file);
     }
 
-    function createPlayer(key, sheet) {
+    function createPlayer(key, entry) {
       var video = document.createElement('video');
       // Properties for playing, attributes too: iOS Safari reads the
       // attributes when deciding whether a video may play inline unasked.
@@ -2832,7 +2909,7 @@
       // A sheet that cannot be fetched or decoded shows posters; it is not
       // asked for again, so a failure costs one request, not one per frame.
       video.addEventListener('error', function () { failPlayer(player); });
-      video.src = sheetURL(sheet);
+      video.src = entry.webName ? webCopyURL(entry.webName) : sheetURL(entry.sheet);
       players.set(key, player);
       return player;
     }
@@ -2891,7 +2968,7 @@
 
     function requestFrames(player) {
       if (frameCallbackSupported) {
-        if (player.frameRequest === null) player.frameRequest = player.video.requestVideoFrameCallback(function () { onVideoFrame(player); });
+        if (player.frameRequest === null) player.frameRequest = player.video.requestVideoFrameCallback(function (now, metadata) { onVideoFrame(player, metadata); });
       } else if (framePumpRaf === null) {
         framePumpRaf = requestAnimationFrame(pumpFramesWithoutCallback);
       }
@@ -2902,11 +2979,18 @@
       player.frameRequest = null;
     }
 
-    function onVideoFrame(player) {
+    function onVideoFrame(player, metadata) {
       player.frameRequest = null;
       if (!player.wanted) return;
       showCurrentFrame(player);
+      loopWebCopyAtPreviewEnd(player, metadata ? metadata.mediaTime : player.video.currentTime);
       requestFrames(player);
+    }
+
+    // A web copy in the grid shows the first loopSeconds, like the mosaics
+    // (a shorter video loops by itself: the element has loop set).
+    function loopWebCopyAtPreviewEnd(player, mediaTime) {
+      if (isWebCopyKey(player.key) && mediaTime >= loopSeconds) player.video.currentTime = 0;
     }
 
     // Browsers without requestVideoFrameCallback: every animation frame,
@@ -2918,6 +3002,7 @@
         if (!player.wanted) return;
         anyPlaying = true;
         if (player.video.currentTime !== player.lastUploadedTime) showCurrentFrame(player);
+        loopWebCopyAtPreviewEnd(player, player.video.currentTime);
       });
       if (anyPlaying) framePumpRaf = requestAnimationFrame(pumpFramesWithoutCallback);
     }
@@ -2952,7 +3037,7 @@
       if (!motionAllowed()) pauseAll();
       if (canvasEl) scheduleGridRedraw();
     }
-    if (atlas) document.addEventListener('visibilitychange', onVisibilityChanged);
+    if (active) document.addEventListener('visibilitychange', onVisibilityChanged);
 
     // Test hook: every tile on screen drawn from a video frame now, with
     // its size in device px and the size of the picture it is drawn from
@@ -2968,8 +3053,9 @@
         if (!player || !player.hasFrame) return;
         entry.tiles.forEach(function (t, i) {
           if (t.y < bottom && t.y + t.h > top) {
+            var source = entry.sources[i] || { width: player.video.videoWidth, height: player.video.videoHeight };
             drawn.push({ name: t.name, deviceW: t.w * dpr, deviceH: t.h * dpr, source: key,
-              sourceW: entry.sources[i].width, sourceH: entry.sources[i].height });
+              sourceW: source.width, sourceH: source.height });
           }
         });
       });
@@ -2985,7 +3071,9 @@
       });
       return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
         drawn: drawnTilesOnScreen(),
-        idealTier: idealTier, chosenTier: chosenTier, upscaleTolerance: UPSCALE_TOLERANCE, drawCalls: counters.drawCalls, collects: counters.collects,
+        idealTier: idealTier, chosenTier: chosenTier, upscaleTolerance: UPSCALE_TOLERANCE,
+        maxPlayingWebCopies: MAX_PLAYING_WEB_COPIES,
+        webCopiesMuted: Array.from(players.values()).every(function (p) { return !isWebCopyKey(p.key) || p.video.muted; }), drawCalls: counters.drawCalls, collects: counters.collects,
         textureBytes: textureBytes, uploads: counters.uploads, uploadMs: counters.uploadMs, drawMs: counters.drawMs };
     }
 

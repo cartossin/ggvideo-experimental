@@ -302,17 +302,26 @@ browsers need to play and seek video.
 - **Grid.** Each mosaic sheet with a tile on screen plays in one hidden,
   muted, looping `<video>`; every new frame is uploaded to a WebGL texture
   and that sheet's tiles are drawn over their posters (the drawing buffer
-  is kept, so a frame does not redraw the grid). The tier is chosen per
-  tile from its height in device pixels, like the per-photo tiers. At most
-  4 sheets play and 8 are kept; a sheet off screen pauses at once and is
-  freed after 15 s. Posters stay where nothing plays: tiles under 24
-  device pixels, a hidden page, the photo view, a video not in the atlas
-  yet, and a sheet that could not be loaded or decoded. The tiles move
-  with `prefers-reduced-motion` too (it is often on for the system's own
-  animations); only an opened video then waits for a click. Every video
-  tile big enough has a small badge, a play triangle; its duration is
-  added while the mouse is over the top controls' pull tab or the
-  controls are revealed (not on touch screens).
+  is kept, so a frame does not redraw the grid; a frame is one draw call
+  per sheet). Pixels are never stretched, as for stills: one tier serves
+  every tile in view, the smallest at least as tall as the tallest video
+  tile on screen in device pixels (10% tolerated, since justified rows are
+  never exactly a tier's height), scaled down, at most 4x. A tile taller
+  than every tier, or whose video the tier lacks, plays its web copy
+  instead, muted and looping the first 60 s like the mosaics, drawn the
+  same way; at most 8 at once, nearest the window's centre first, freed
+  as soon as they leave the screen or the grid. Only as a degraded case,
+  when the tiles on screen are spread over more than 4 sheets of the
+  right tier, a smaller tier plays. A sheet off screen pauses at once and
+  is freed after 15 s. Posters stay where nothing plays: tiles under a
+  quarter of the smallest tier, a hidden page, the photo view, a video not
+  ready yet, and anything that could not be loaded or decoded. The tiles
+  move with `prefers-reduced-motion` too (it is often on for the system's
+  own animations); only an opened video then waits for a click. While the
+  mouse is over the top controls' pull tab, or the controls are open (on
+  a touch screen: after a tap on the tab), every video tile at least 60
+  px high and 40 wide shows a small badge with a play triangle and its
+  duration; otherwise there is no badge at all.
 - **Opening a video** shows a native `<video controls>` over the poster, in
   the box a photo would fill, playing the web copy (with sound, if the
   browser lets the page start it; otherwise it waits for a click), and a
