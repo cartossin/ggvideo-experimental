@@ -205,14 +205,19 @@ What the server makes for each video, in this order:
 2. **Preview clips and the video atlas.** Each video's first
    `VIDEO_PREVIEW_SECONDS` (60), or its whole seconds when shorter, without
    sound, at a constant `VIDEO_PREVIEW_FPS` (24), scaled to each tier's
-   tile height (`VIDEO_TIERS`: 25, 50, 100 and 200 px; wider than 4:1 is
-   shrunk to 4:1) are cached as small clips in `gg/`, with a keyframe at
-   every second. All of a folder's clips are then packed into mosaic
+   tile height (`VIDEO_TIERS`: 25, 50, 100, 200 and 400 px; wider than
+   4:1 is shrunk to 4:1) are cached as small clips in `gg/`, with a
+   keyframe at every second. A video has no tile in a tier taller than
+   its own picture (a 360p video none in h400): the viewer shows the
+   smallest tier at least as large as the tile on screen and scales it
+   down, so no tile is ever an enlargement; above a video's tallest tier
+   its pixels are all there is. All of a folder's clips are then packed into mosaic
    videos, one or more per tier, each exactly 60 s long so they all loop
    together; a shorter video loops inside its tile. A mosaic is limited
    only by its 3840x2160 frame (hardware decoding works everywhere up to
    that, at 30 fps): about 4,600 h25 tiles of 16:9 video, 1,480 h50, 400
-   h100 or 104 h200, so 10,000 videos fill 3 h25 sheets. Each tile is
+   h100, 104 h200 or 25 h400 (35 of 4:3), so 10,000 videos fill 3 h25
+   sheets. Each tile is
    surrounded by 4 px of its own edge pixels so compression never mixes
    neighbours. A viewer plays one mosaic per tier, uploads it to a WebGL
    texture each frame and cuts tiles out of it. The layout is in
@@ -272,7 +277,10 @@ frame rate) or a new version encodes mosaics differently, each folder's
 atlas is made again the next time its video work runs (at startup, at
 latest): only missing clip tiers are made (one more pass over each video's
 first minute for a new tier), sheets whose content is unchanged are
-reused, and web copies and posters are not touched. This version's clips
+reused, and web copies and posters are not touched. Adding a tier keeps
+every tile of the other tiers in its place (the layout is kept across
+tier changes), so only that tier's clips and sheets are made; the old
+atlas is served until the new one is committed. This version's clips
 have a keyframe every second, which earlier clips lack, so after upgrading
 every clip is made once more.
 
@@ -488,7 +496,7 @@ is refused as ambiguous).
 | `VIPS_CONCURRENCY` | `1` | Threads inside each vips process. Builds run several processes instead (`BUILD_CONCURRENCY`) |
 | `VIDEO_PREVIEW_SECONDS` | `60` | Length of every mosaic, and of the part of each video it shows (2 to 600) |
 | `VIDEO_PREVIEW_FPS` | `24` | Frame rate of the mosaics (1 to 30) |
-| `VIDEO_TIERS` | `25,50,100,200` | Tile heights of the video atlas, 16 to 1080, at most six |
+| `VIDEO_TIERS` | `25,50,100,200,400` | Tile heights of the video atlas, 16 to 1080, at most six |
 | `VIDEO_MOSAIC_MEMORY` | `512MiB` | Frame buffers of one mosaic being made (two chunks of whole seconds, at least one second each) |
 | `VIDEO_RETRY_SECONDS` | `300` | A clip or web copy that failed for a passing reason (out of tasks, memory or disk; ffmpeg killed) is tried again after this, then at doubling intervals up to 6 hours, 8 times; a failed atlas after twice this |
 | `VIDEO_WEB_MAX_HEIGHT` | `1080` | Short side of the web copy at most (the long side at most 16:9 of it); never upscaled |
