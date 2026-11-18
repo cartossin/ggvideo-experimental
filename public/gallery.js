@@ -3873,8 +3873,19 @@
       seek.setAttribute('aria-valuenow', String(Math.round(now)));
       seek.setAttribute('aria-valuetext', formatTime(now) + ' of ' + (total ? formatDuration(total) : 'unknown'));
     }
+    // The browser changes its buffered ranges at a seek (a new one starts
+    // there) and as a download grows or completes, and fires 'progress'
+    // for only some of it: none once a download has stopped. So the ranges
+    // are read again on every event that may follow a change, and drawn
+    // again only when they differ from those drawn (in tenths of seconds).
+    var drawnBuffered = '';
     function showBuffered() {
       var total = duration();
+      var ranges = [];
+      for (var r = 0; r < video.buffered.length; r++) ranges.push(video.buffered.start(r).toFixed(1) + '-' + video.buffered.end(r).toFixed(1));
+      var now = total.toFixed(1) + ':' + ranges.join(',');
+      if (now === drawnBuffered) return;
+      drawnBuffered = now;
       buffered.textContent = '';
       if (!total) return;
       for (var i = 0; i < video.buffered.length; i++) {
@@ -4083,11 +4094,12 @@
     listen(video, 'click', onPictureClick);
     listen(video, 'play', showPlaying);
     listen(video, 'pause', showPlaying);
-    listen(video, 'timeupdate', showPosition);
+    listen(video, 'timeupdate', function () { showPosition(); showBuffered(); });
+    listen(video, 'suspend', showBuffered);
     listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
     listen(video, 'progress', showBuffered);
     listen(video, 'volumechange', showVolume);
-    listen(video, 'seeked', onSeeked);
+    listen(video, 'seeked', function () { onSeeked(); showBuffered(); });
     listen(seek, 'pointerdown', onSeekPointerDown);
     listen(seek, 'pointermove', onSeekPointerMove);
     listen(seek, 'pointerup', onSeekPointerUp);
