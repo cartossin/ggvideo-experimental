@@ -2525,6 +2525,20 @@
     // included: a decoder and a texture each, and a full 4K sheet's texture
     // alone is 33 MB.
     var MAX_PLAYING_SHEETS = 4;
+    // How much larger than its tier a tile may be drawn (device px). The
+    // rule, as for stills: never stretch pixels; take the smallest tier at
+    // least as tall as the tile and scale it down. A tenth is tolerated
+    // because rows are justified to the window's width, so a row's height
+    // is never exactly a tier's: without it a row 5% taller than h200
+    // would take h400, four times the pixels to decode and a quarter of
+    // the tiles per sheet, for detail a 10% enlargement of a CRF 26 mosaic
+    // (4:2:0, already softer than its pixel count) does not show. (Stills
+    // use TIER_UPSCALE_ALLOWED, 1.3; that is too loose for this rule.)
+    var UPSCALE_TOLERANCE = 1.1;
+    // The server shrinks a video wider than 4:1 to 4:1 wide in every tier
+    // (lib/videos.js tileSize), so such a tile's picture is only 4 times
+    // its tier wide; its width, not its height, decides the tier it needs.
+    var WIDEST_TILE_ASPECT = 4;
     var MAX_LIVE_SHEETS = 8;
     // A paused sheet is kept this long, so scrolling back resumes it at
     // once; then its element and texture are freed.
@@ -2560,14 +2574,15 @@
     function sheetKey(tierHeight, sheetIndex) { return 'h' + tierHeight + ':' + sheetIndex; }
     function textureKeyOf(key) { return 'video:' + key; }
 
-    // The tier for a tile drawn deviceH pixels tall: the smallest that
-    // covers it give or take TIER_UPSCALE_ALLOWED, as for the per-photo
-    // tiers; above the largest, the largest.
+    // The tier for a tile drawn deviceH pixels tall: the smallest at
+    // least that tall (give or take UPSCALE_TOLERANCE), scaled down. null
+    // when the tile is taller than every tier: no mosaic is drawn
+    // stretched.
     function tierForTileHeight(deviceH) {
       for (var i = 0; i < tierHeights.length; i++) {
-        if (tierHeights[i] >= deviceH / TIER_UPSCALE_ALLOWED) return tierHeights[i];
+        if (tierHeights[i] * UPSCALE_TOLERANCE >= deviceH) return tierHeights[i];
       }
-      return tierHeights[tierHeights.length - 1];
+      return null;
     }
 
     // Whether the grid is showing, so its sheets may play. Not gated on
@@ -2581,8 +2596,18 @@
 
     // ---- what the buffer shows ----
 
-    // Whether a tile drawn t.h CSS px tall is drawn from tierHeight at all.
-    function movesAt(t, tierHeight, dpr) { return t.h * dpr >= tierHeight / MAX_MINIFICATION; }
+    // The tier height a tile needs to be drawn without stretching: its
+    // height in device px, or a quarter of its width for one wider than 4:1.
+    function heightNeeded(t, dpr) { return Math.max(t.h, t.w / WIDEST_TILE_ASPECT) * dpr; }
+
+    // Whether a tile drawn t.h CSS px tall is drawn from tierHeight at all:
+    // not shrunk more than MAX_MINIFICATION, and not taller than every
+    // tier (those are never stretched). rect is the tile's rectangle in
+    // that tier, absent for a video the tier does not have.
+    function movesAt(t, rect, tierHeight, dpr) {
+      var deviceH = t.h * dpr;
+      return !!rect && deviceH >= tierHeight / MAX_MINIFICATION && tierForTileHeight(heightNeeded(t, dpr)) !== null;
+    }
 
     // The video tiles of the atlas on screen now: [{ t, atlasIndex }].
     function videoTilesOnScreen() {
@@ -2607,27 +2632,32 @@
       var sheets = new Set();
       for (var i = 0; i < onScreen.length && sheets.size <= limit; i++) {
         var rect = tiles[onScreen[i].atlasIndex];
-        if (rect && movesAt(onScreen[i].t, tierHeight, dpr)) sheets.add(rect[0]);
+        if (movesAt(onScreen[i].t, rect, tierHeight, dpr)) sheets.add(rect[0]);
       }
       return sheets;
     }
 
     // One tier for every moving tile in view, so a zoom never decodes two
     // tiers at once (rows stretched differently used to pick two). The
-    // ideal tier is the one the tallest video tile on screen wants. If the
-    // tiles on screen are spread over more of its sheets than can play at
-    // once, the next smaller tier is tried, and so on: a smaller tier
-    // packs more tiles per sheet, and motion everywhere beats sharpness.
-    // Only when even the smallest tier needs too many sheets does the view
-    // stay posters (chosen null). Returns { ideal, chosen }.
+    // ideal tier is the one the tallest video tile on screen wants that
+    // some tier covers (taller ones get no mosaic). Only as a degraded
+    // case, if the tiles on screen are spread over more of its sheets than
+    // can play at once, the next smaller tier is tried, and so on: a
+    // smaller tier packs more tiles per sheet, and motion everywhere beats
+    // sharpness there. Only when even the smallest tier needs too many
+    // sheets does the view stay posters (chosen null). Returns
+    // { ideal, chosen }; both null when no tile on screen fits a tier.
     function chooseTier(onScreen, dpr) {
       if (!onScreen.length) {
-        var forRows = tierForTileHeight(currentRowHeight * dpr);
+        var forRows = tierForTileHeight(currentRowHeight * dpr);   // none on screen: nothing plays anyway
         return { ideal: forRows, chosen: forRows };
       }
-      var tallest = 0;
-      for (var i = 0; i < onScreen.length; i++) tallest = Math.max(tallest, onScreen[i].t.h * dpr);
-      var ideal = tierForTileHeight(tallest);
+      var ideal = null;
+      for (var i = 0; i < onScreen.length; i++) {
+        var wanted = tierForTileHeight(heightNeeded(onScreen[i].t, dpr));
+        if (wanted !== null && (ideal === null || wanted > ideal)) ideal = wanted;
+      }
+      if (ideal === null) return { ideal: null, chosen: null };
       for (var j = tierHeights.indexOf(ideal); j >= 0; j--) {
         if (sheetsNeeded(onScreen, tierHeights[j], dpr, MAX_PLAYING_SHEETS).size <= MAX_PLAYING_SHEETS) {
           return { ideal: ideal, chosen: tierHeights[j] };
@@ -2649,14 +2679,15 @@
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         var atlasIndex = atlasIndexByName.get(t.name);
-        if (atlasIndex === undefined || !movesAt(t, tierHeight, dpr)) continue;
+        if (atlasIndex === undefined) continue;
         var rect = tier.tiles[atlasIndex];   // [sheetIndex, x, y, width, height]
         var sheet = rect && tier.sheets[rect[0]];
-        if (!sheet) continue;
+        if (!sheet || !movesAt(t, rect, tierHeight, dpr)) continue;
         var key = sheetKey(tierHeight, rect[0]);
         var entry = perSheet.get(key);
-        if (!entry) { entry = { sheet: sheet, tiles: [], values: [] }; perSheet.set(key, entry); }
+        if (!entry) { entry = { sheet: sheet, tiles: [], sources: [], values: [] }; perSheet.set(key, entry); }
         entry.tiles.push(t);
+        entry.sources.push({ width: rect[3], height: rect[4] });
         entry.values.push(t.x, t.y - glOriginY, t.w, t.h,
           rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
       }
@@ -2677,7 +2708,8 @@
           gridRenderer.uploadStatic(badgeKey, badges);
           staticBufferKeys.push(badgeKey);
         }
-        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, instanceKey: instanceKey, badgeKey: badgeKey });
+        sheetsInBuffer.set(key, { sheet: entry.sheet, tiles: entry.tiles, sources: entry.sources,
+          instanceKey: instanceKey, badgeKey: badgeKey });
       });
       previousBuffers.forEach(function (bufferKey) {
         if (staticBufferKeys.indexOf(bufferKey) < 0) gridRenderer.dropStatic(bufferKey);
@@ -2692,7 +2724,7 @@
       var tiles = atlas.tiers['h' + chosenTier].tiles;
       for (var i = 0; i < onScreen.length; i++) {
         var rect = tiles[onScreen[i].atlasIndex];
-        if (!rect || !movesAt(onScreen[i].t, chosenTier, dpr)) continue;
+        if (!movesAt(onScreen[i].t, rect, chosenTier, dpr)) continue;
         var key = sheetKey(chosenTier, rect[0]);
         if (sheetsInBuffer.has(key)) counts.set(key, (counts.get(key) || 0) + 1);
       }
@@ -2922,6 +2954,28 @@
     }
     if (atlas) document.addEventListener('visibilitychange', onVisibilityChanged);
 
+    // Test hook: every tile on screen drawn from a video frame now, with
+    // its size in device px and the size of the picture it is drawn from
+    // (its rectangle in the sheet).
+    function drawnTilesOnScreen() {
+      var drawn = [];
+      var thumbsEl = $('thumbs');
+      if (!thumbsEl) return drawn;
+      var top = viewTop(thumbsEl), bottom = top + thumbsEl.clientHeight;
+      var dpr = devicePixelRatio();
+      sheetsInBuffer.forEach(function (entry, key) {
+        var player = players.get(key);
+        if (!player || !player.hasFrame) return;
+        entry.tiles.forEach(function (t, i) {
+          if (t.y < bottom && t.y + t.h > top) {
+            drawn.push({ name: t.name, deviceW: t.w * dpr, deviceH: t.h * dpr, source: key,
+              sourceW: entry.sources[i].width, sourceH: entry.sources[i].height });
+          }
+        });
+      });
+      return drawn;
+    }
+
     function stats() {
       var list = [];
       var textureBytes = 0;
@@ -2930,7 +2984,8 @@
         if (player.hasFrame) textureBytes += player.video.videoWidth * player.video.videoHeight * 4;
       });
       return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
-        idealTier: idealTier, chosenTier: chosenTier, drawCalls: counters.drawCalls, collects: counters.collects,
+        drawn: drawnTilesOnScreen(),
+        idealTier: idealTier, chosenTier: chosenTier, upscaleTolerance: UPSCALE_TOLERANCE, drawCalls: counters.drawCalls, collects: counters.collects,
         textureBytes: textureBytes, uploads: counters.uploads, uploadMs: counters.uploadMs, drawMs: counters.drawMs };
     }
 
