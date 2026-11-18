@@ -225,7 +225,7 @@
   function reloadIsAwaited() { return waitingForFirstBuild || buildReplaced || trashAwaitsBuild(); }
 
   // The folder's video work (the answer's video object: preview clips,
-  // mosaic sheets, web copies) goes on long after its photos are built,
+  // mosaic sheets, web copies, storyboards) goes on long after its photos are built,
   // hours for thousands of videos. What is left of it, '' when nothing is.
   var VIDEO_WORK_POLL_MS = 10000;
   var videoWorkSeen = false;       // an answer of this page said video work was running
@@ -235,6 +235,7 @@
     if (video.clipsRemaining > 0) left.push('previews of ' + video.clipsRemaining + ' video' + (video.clipsRemaining === 1 ? '' : 's'));
     if (video.sheetsRemaining > 0) left.push(video.sheetsRemaining + ' mosaic sheet' + (video.sheetsRemaining === 1 ? '' : 's'));
     if (video.webRemaining > 0) left.push(video.webRemaining + ' playable cop' + (video.webRemaining === 1 ? 'y' : 'ies'));
+    if (video.storyboardsRemaining > 0) left.push(video.storyboardsRemaining + ' storyboard' + (video.storyboardsRemaining === 1 ? '' : 's'));
     return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : 'Preparing videos…';
   }
   // A request that gets no answer (network down, server restarting, an HTTP
@@ -2652,13 +2653,34 @@
 
     // The sheets of a tier that these on-screen tiles would play; counting
     // stops once there are more than `limit`.
+    // Where a video's tile is drawn from when the view's tier is
+    // tierHeight: that tier, or, when the video has no tile there (its own
+    // picture is smaller than the tier's tiles: a null in tiles, see
+    // lib/video_atlas.js), the tallest tier below that has one, since its
+    // pixels are all the video has. Every video has a tile in the smallest
+    // tier. Returns { tierHeight, rect, sheet } or null when the tile is
+    // not drawn from a mosaic (too small for it, taller than every tier,
+    // or a video the atlas lacks).
+    function mosaicSourceOf(t, atlasIndex, tierHeight, dpr) {
+      if (atlasIndex === undefined || tierHeight === null) return null;
+      for (var i = tierHeights.indexOf(tierHeight); i >= 0; i--) {
+        var tier = atlas.tiers['h' + tierHeights[i]];
+        var rect = tier.tiles[atlasIndex];
+        if (!rect) continue;
+        var sheet = tier.sheets[rect[0]];
+        return sheet && movesAt(t, rect, tierHeights[i], dpr) ? { tierHeight: tierHeights[i], rect: rect, sheet: sheet } : null;
+      }
+      return null;
+    }
+
+    // The sheets these on-screen tiles would play with the view's tier
+    // tierHeight, its videos' tallest tiers below it included; counting
+    // stops once there are more than `limit`.
     function sheetsNeeded(onScreen, tierHeight, dpr, limit) {
-      var tiles = atlas.tiers['h' + tierHeight].tiles;
       var sheets = new Set();
       for (var i = 0; i < onScreen.length && sheets.size <= limit; i++) {
-        if (onScreen[i].atlasIndex === undefined) continue;
-        var rect = tiles[onScreen[i].atlasIndex];
-        if (movesAt(onScreen[i].t, rect, tierHeight, dpr)) sheets.add(rect[0]);
+        var source = mosaicSourceOf(onScreen[i].t, onScreen[i].atlasIndex, tierHeight, dpr);
+        if (source) sheets.add(sheetKey(source.tierHeight, source.rect[0]));
       }
       return sheets;
     }
@@ -2700,25 +2722,23 @@
     function collectSheetsInBuffer(dpr, tierHeight) {
       counters.collects++;
       sheetsInBuffer = new Map();
-      var tier = tierHeight === null ? null : atlas.tiers['h' + tierHeight];
       var perSheet = new Map();
       var bufferBottom = bufferTop + bufferH;
       for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         if (!isVideoName(t.name)) continue;
-        var atlasIndex = atlasIndexByName.get(t.name);
-        var rect = tier && atlasIndex !== undefined ? tier.tiles[atlasIndex] : null;   // [sheetIndex, x, y, width, height]
-        var sheet = rect && tier.sheets[rect[0]];
-        if (!sheet || !movesAt(t, rect, tierHeight, dpr)) {
-          if (playsWebCopy(t, rect, dpr)) addWebCopyTile(perSheet, t);
+        var source = mosaicSourceOf(t, atlasIndexByName.get(t.name), tierHeight, dpr);
+        if (!source) {
+          if (playsWebCopy(t, dpr)) addWebCopyTile(perSheet, t);
           continue;
         }
-        var key = sheetKey(tierHeight, rect[0]);
+        var rect = source.rect, sheet = source.sheet;   // rect: [sheetIndex, x, y, width, height]
+        var key = sheetKey(source.tierHeight, rect[0]);
         var entry = perSheet.get(key);
         if (!entry) { entry = { sheet: sheet, tiles: [], sources: [], values: [] }; perSheet.set(key, entry); }
         entry.tiles.push(t);
-        entry.sources.push({ width: rect[3], height: rect[4] });
+        entry.sources.push({ width: rect[3], height: rect[4], videoTallest: source.tierHeight !== tierHeight });
         entry.values.push(t.x, t.y - glOriginY, t.w, t.h,
           rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
       }
@@ -2748,14 +2768,10 @@
     }
 
     // Whether a video tile not drawn from a mosaic plays its web copy: it is
-    // taller than every tier, or the view's tier does not have its video
-    // (an atlas without it at all included). Not while the view stays
-    // posters because too many sheets are on screen, and not before the
+    // taller than every tier (an atlas without it at all included), and the
     // copy exists.
-    function playsWebCopy(t, rect, dpr) {
-      if (!window.videos[t.name].web) return false;
-      if (tierForTileHeight(heightNeeded(t, dpr)) === null) return true;
-      return chosenTier !== null && !rect;
+    function playsWebCopy(t, dpr) {
+      return !!window.videos[t.name].web && tierForTileHeight(heightNeeded(t, dpr)) === null;
     }
 
     function addWebCopyTile(perSheet, t) {
@@ -2771,13 +2787,10 @@
     // chosen tier.
     function tilesOnScreenBySheet(onScreen, dpr) {
       var counts = new Map();
-      if (chosenTier === null) return counts;
-      var tiles = atlas.tiers['h' + chosenTier].tiles;
       for (var i = 0; i < onScreen.length; i++) {
-        if (onScreen[i].atlasIndex === undefined) continue;
-        var rect = tiles[onScreen[i].atlasIndex];
-        if (!movesAt(onScreen[i].t, rect, chosenTier, dpr)) continue;
-        var key = sheetKey(chosenTier, rect[0]);
+        var source = mosaicSourceOf(onScreen[i].t, onScreen[i].atlasIndex, chosenTier, dpr);
+        if (!source) continue;
+        var key = sheetKey(source.tierHeight, source.rect[0]);
         if (sheetsInBuffer.has(key)) counts.set(key, (counts.get(key) || 0) + 1);
       }
       return counts;
@@ -3055,7 +3068,7 @@
           if (t.y < bottom && t.y + t.h > top) {
             var source = entry.sources[i] || { width: player.video.videoWidth, height: player.video.videoHeight };
             drawn.push({ name: t.name, deviceW: t.w * dpr, deviceH: t.h * dpr, source: key,
-              sourceW: source.width, sourceH: source.height });
+              sourceW: source.width, sourceH: source.height, videoTallest: !!source.videoTallest });
           }
         });
       });
@@ -3640,43 +3653,184 @@
 
   // ---- storyboards ------------------------------------------------------
   // Frames sampled over a whole video, packed in sprite sheets, for the
-  // seek bar's previews. The player asks one question:
-  //   storyboardFrameAt(name, seconds) -> { url, x, y, width, height,
-  //     sheetWidth, sheetHeight } (a frame's rectangle in its sheet), or
-  //   null when the video has none.
-  // The server's contract is not final; until then this reads
-  // window.videos[name].storyboard shaped as (provisional):
-  //   { interval: seconds between frames (frame i shows i * interval),
-  //     count, frameWidth, frameHeight, columns, rows,
-  //     sheets: [file name in gg/, ...] (columns x rows frames each, row
-  //     by row) }
-  // and this function is the one place to change when the contract lands.
-  function storyboardFrameAt(name, seconds) {
+  // seek bar's previews (the contract is at the top of lib/storyboard.js).
+  // window.videos[name].storyboard is null (none yet, or a video under
+  // 30 s) or { interval, count, width, height, columns, rows, sheets }:
+  // frame i shows time i * interval, in sheets[floor(i / (columns * rows))]
+  // at column i % columns and row floor(i / columns) % rows, width x height;
+  // the last sheet has only the rows its frames need.
+  function storyboardOf(name) {
     var info = isVideoName(name) && window.videos[name].storyboard;
-    if (!info || !(info.interval > 0) || !(info.count > 0) || !info.sheets || !info.sheets.length) return null;
-    var index = Math.min(info.count - 1, Math.max(0, Math.floor(seconds / info.interval)));
-    var perSheet = info.columns * info.rows;
-    var sheet = info.sheets[Math.floor(index / perSheet)];
-    if (!sheet) return null;
-    var inSheet = index % perSheet;
-    return {
-      url: folderURL + GG_DIR + '/' + encodeURIComponent(sheet),
-      x: (inSheet % info.columns) * info.frameWidth,
-      y: Math.floor(inSheet / info.columns) * info.frameHeight,
-      width: info.frameWidth,
-      height: info.frameHeight,
-      sheetWidth: info.columns * info.frameWidth,
-      sheetHeight: info.rows * info.frameHeight,
-    };
+    var usable = info && info.interval > 0 && info.count > 0 && info.width > 0 && info.height > 0 &&
+      info.columns > 0 && info.rows > 0 && info.sheets && info.sheets.length;
+    return usable ? info : null;
   }
 
-  // Shows `frame` in `element` (a block width x height CSS px) as its
-  // background: the sheet scaled so that one frame fills the block.
-  function paintStoryboardFrame(element, frame, width, height) {
-    var scaleX = width / frame.width, scaleY = height / frame.height;
-    element.style.backgroundImage = 'url("' + frame.url + '")';
-    element.style.backgroundSize = (frame.sheetWidth * scaleX) + 'px ' + (frame.sheetHeight * scaleY) + 'px';
-    element.style.backgroundPosition = (-frame.x * scaleX) + 'px ' + (-frame.y * scaleY) + 'px';
+  function storyboardSheetURL(info, sheetIndex) {
+    var sheet = info.sheets[sheetIndex];
+    return sheet ? folderURL + GG_DIR + '/' + encodeURIComponent(sheet) : null;
+  }
+
+  // ---- a storyboard ready for scrubbing ----
+  // Dragging the seek bar must show a picture for the pointer's position
+  // at once however fast it moves (the low-quality picture that follows
+  // the playhead on the big video sites), so the whole storyboard is
+  // fetched and decoded ahead of need when a video is opened: it is small
+  // (a 2 h film's is ten sheets, 2.9 MB), and painting a frame must never
+  // wait for a fetch or an image decode. The sheets are fetched in the
+  // background at low priority once the video has its first data (so
+  // they never delay its start), the sheet at the current position first,
+  // then outward; the sheet under the pointer jumps the queue. Each is
+  // decoded to an ImageBitmap, scaled down if needed so all of them fit
+  // in STORYBOARD_DECODED_BUDGET_BYTES (a 2 h film's 987 frames are 179 MB
+  // at full size, 64 MB at 0.6 of it, still sharper than a hover bubble
+  // needs). A storyboard of more than STORYBOARD_MAX_RESIDENT_SHEETS
+  // sheets (none today) keeps the nearest ones and loads the others as
+  // the pointer approaches. Everything is released when the player closes.
+  var STORYBOARD_DECODED_BUDGET_BYTES = 64 * 1024 * 1024;
+  var STORYBOARD_MAX_RESIDENT_SHEETS = 40;
+  var STORYBOARD_PARALLEL_FETCHES = 2;
+
+  // The storyboard of `name`, or null when it has none. Returns
+  // { start(seconds), prioritize(seconds), frameAt(seconds), state(), destroy() }.
+  function createStoryboardLoader(name) {
+    var info = storyboardOf(name);
+    if (!info) return null;
+    var perSheet = info.columns * info.rows;
+    var sheetCount = info.sheets.length;
+    var residentFrames = Math.min(info.count, STORYBOARD_MAX_RESIDENT_SHEETS * perSheet);
+    var scale = Math.min(1, Math.sqrt(STORYBOARD_DECODED_BUDGET_BYTES / (residentFrames * info.width * info.height * 4)));
+    var sheets = new Map();   // sheet index -> { bitmap, controller, failed }
+    var queue = [];           // sheet indexes still to fetch, next first
+    var focus = 0;            // the sheet the queue is ordered around
+    var inFlight = 0;
+    var started = false, closed = false;
+    var timing = { openedAt: performance.now(), startedAt: 0, allReadyAt: 0 };
+
+    function frameIndexAt(seconds) { return Math.min(info.count - 1, Math.max(0, Math.round(seconds / info.interval))); }
+    function sheetOfFrame(index) { return Math.floor(index / perSheet); }
+    function readySheet(k) { var sheet = sheets.get(k); return sheet && sheet.bitmap ? sheet : null; }
+
+    // The sheets to have, nearest `around` first, at most the resident limit.
+    function wantedOrder(around) {
+      var order = [around];
+      for (var d = 1; order.length < Math.min(sheetCount, STORYBOARD_MAX_RESIDENT_SHEETS); d++) {
+        if (around + d < sheetCount) order.push(around + d);
+        if (around - d >= 0 && order.length < STORYBOARD_MAX_RESIDENT_SHEETS) order.push(around - d);
+        if (around + d >= sheetCount && around - d < 0) break;
+      }
+      return order;
+    }
+    function plan(around) {
+      focus = around;
+      queue = wantedOrder(around).filter(function (k) { return !sheets.has(k); });
+      pump();
+    }
+    function start(seconds) {
+      if (started || closed) return;
+      started = true;
+      timing.startedAt = performance.now();
+      plan(sheetOfFrame(frameIndexAt(seconds)));
+    }
+    // The sheet under the pointer first (starting the loading if the
+    // video's first data has not come yet: the visitor wants it now).
+    function prioritize(seconds) {
+      if (closed) return;
+      var k = sheetOfFrame(frameIndexAt(seconds));
+      if (!started) { started = true; timing.startedAt = performance.now(); plan(k); return; }
+      if (k !== focus) plan(k);
+    }
+    function pump() {
+      while (!closed && inFlight < STORYBOARD_PARALLEL_FETCHES && queue.length) load(queue.shift());
+    }
+    // Beyond the resident limit, the sheet farthest from the focus goes.
+    function makeRoom() {
+      var resident = Array.from(sheets.keys());
+      if (resident.length < STORYBOARD_MAX_RESIDENT_SHEETS) return;
+      resident.sort(function (a, b) { return Math.abs(b - focus) - Math.abs(a - focus); });
+      var farthest = sheets.get(resident[0]);
+      if (farthest.controller) farthest.controller.abort();
+      if (farthest.bitmap) farthest.bitmap.close();
+      sheets.delete(resident[0]);
+    }
+    function load(k) {
+      makeRoom();
+      var sheet = { bitmap: null, controller: new AbortController(), failed: false };
+      sheets.set(k, sheet);
+      inFlight++;
+      var rows = Math.ceil(Math.min(perSheet, info.count - k * perSheet) / info.columns);
+      var options = scale < 1 ? { resizeWidth: Math.max(1, Math.round(info.columns * info.width * scale)),
+        resizeHeight: Math.max(1, Math.round(rows * info.height * scale)), resizeQuality: 'medium' } : undefined;
+      fetch(storyboardSheetURL(info, k), { credentials: 'same-origin', priority: 'low', signal: sheet.controller.signal })
+        .then(function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          return response.blob();
+        })
+        .then(function (blob) { return options ? createImageBitmap(blob, options) : createImageBitmap(blob); })
+        .then(function (bitmap) {
+          if (closed || sheets.get(k) !== sheet) { bitmap.close(); return; }
+          sheet.bitmap = bitmap;
+          sheet.controller = null;
+          if (!timing.allReadyAt && countReady() === Math.min(sheetCount, STORYBOARD_MAX_RESIDENT_SHEETS)) timing.allReadyAt = performance.now();
+        }, function () {
+          // Aborted, or the sheet could not be had: the bar does without it.
+          if (sheets.get(k) === sheet) { sheet.failed = true; sheet.controller = null; }
+        })
+        .then(function () { inFlight--; pump(); });
+    }
+    function countReady() {
+      var n = 0;
+      sheets.forEach(function (sheet) { if (sheet.bitmap) n++; });
+      return n;
+    }
+
+    // Frame `index` of ready sheet k: its rectangle in the decoded bitmap.
+    function frameIn(sheet, k, index) {
+      var inSheet = index - k * perSheet;
+      var rows = Math.ceil(Math.min(perSheet, info.count - k * perSheet) / info.columns);
+      var scaleX = sheet.bitmap.width / (info.columns * info.width), scaleY = sheet.bitmap.height / (rows * info.height);
+      return { bitmap: sheet.bitmap, index: index,
+        sx: (inSheet % info.columns) * info.width * scaleX, sy: Math.floor(inSheet / info.columns) * info.height * scaleY,
+        sw: info.width * scaleX, sh: info.height * scaleY, aspect: info.width / info.height };
+    }
+    // The frame nearest `seconds` among the decoded ones: its own if its
+    // sheet is ready, else the nearest frame of the nearest ready sheet
+    // (better than nothing while that sheet is still on its way); null
+    // when none is ready yet.
+    function frameAt(seconds) {
+      var index = frameIndexAt(seconds);
+      var k = sheetOfFrame(index);
+      if (readySheet(k)) return frameIn(readySheet(k), k, index);
+      for (var d = 1; d < sheetCount; d++) {
+        if (readySheet(k - d)) return frameIn(readySheet(k - d), k - d, (k - d + 1) * perSheet - 1);
+        if (readySheet(k + d)) return frameIn(readySheet(k + d), k + d, (k + d) * perSheet);
+      }
+      return null;
+    }
+
+    function destroy() {
+      closed = true;
+      queue = [];
+      sheets.forEach(function (sheet) {
+        if (sheet.controller) sheet.controller.abort();
+        if (sheet.bitmap) sheet.bitmap.close();
+      });
+      sheets.clear();
+    }
+    function state() {
+      return { sheets: sheetCount, ready: countReady(), scale: scale,
+        msToAllReady: timing.allReadyAt ? timing.allReadyAt - timing.startedAt : null,
+        msFromOpeningToAllReady: timing.allReadyAt ? timing.allReadyAt - timing.openedAt : null };
+    }
+    return { start: start, prioritize: prioritize, frameAt: frameAt, frameIndexAt: frameIndexAt, state: state, destroy: destroy };
+  }
+
+  // Draws `frame` (frameAt) into `canvas`, whose pixels are the frame's:
+  // the canvas is scaled to its place by CSS.
+  function paintStoryboardFrame(canvas, frame) {
+    var width = Math.max(1, Math.round(frame.sw)), height = Math.max(1, Math.round(frame.sh));
+    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    canvas.getContext('2d').drawImage(frame.bitmap, frame.sx, frame.sy, frame.sw, frame.sh, 0, 0, width, height);
   }
 
   // 75 -> "1:15", 3725 -> "1:02:05"; "" when the duration is unknown.
@@ -3741,7 +3895,7 @@
   function createVideoControls(video, name) {
     var root = playerElement('div', 'main-player');
     root.appendChild(video);
-    var preview = playerElement('div', 'player-scrub-preview', root);
+    var preview = playerElement('canvas', 'player-scrub-preview', root);
     preview.hidden = true;
     var bar = playerElement('div', 'player-controls', root);
     var seek = playerElement('div', 'player-seek', bar);
@@ -3755,7 +3909,7 @@
     var thumb = playerElement('div', 'player-seek-thumb', seek);
     var hover = playerElement('div', 'player-hover', seek);
     hover.hidden = true;
-    var hoverFrame = playerElement('div', 'player-hover-frame', hover);
+    var hoverFrame = playerElement('canvas', 'player-hover-frame', hover);
     var hoverTime = playerElement('div', 'player-hover-time', hover);
     var row = playerElement('div', 'player-row', bar);
     var playButton = playerButton('player-play', row);
@@ -3770,7 +3924,15 @@
     volume.setAttribute('aria-label', 'Volume');
     var fullscreenButton = playerButton('player-fullscreen', row);
 
-    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false };
+    // target: the position wanted last; seekWanted: a seek to it waits for
+    // the one in flight; seekPending: the video has not got there yet.
+    // issued/issuedExact: the last seek given to the video, and whether exact.
+    var storyboard = createStoryboardLoader(name);
+    var pointerFrame = null;   // { clientX, pointerType } waiting for the next animation frame
+    var pointerFrameRequest = null;
+    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
+      issued: null, issuedExact: false };
+    var shownFrames = { hover: null, preview: null };   // storyboard frame indexes painted last (test hook)
     var idleTimer = null;
     var lastPointerType = 'mouse';
     var listeners = [];
@@ -3786,7 +3948,11 @@
       return known > 0 ? known : 0;
     }
     function fraction(seconds) { var d = duration(); return d ? Math.min(1, Math.max(0, seconds / d)) : 0; }
-    function shownTime() { return scrub.active ? scrub.target : video.currentTime; }
+    // The position the bar and the time show: where the visitor is
+    // dragging, or the position a seek is still on its way to (queued
+    // behind another, or in flight: the video's currentTime is then the
+    // older seek's), else where the video is.
+    function shownTime() { return scrub.active || scrub.seekPending ? scrub.target : video.currentTime; }
 
     // ---- showing state ----
     function showPosition() {
@@ -3800,8 +3966,19 @@
       seek.setAttribute('aria-valuenow', String(Math.round(now)));
       seek.setAttribute('aria-valuetext', formatTime(now) + ' of ' + (total ? formatDuration(total) : 'unknown'));
     }
+    // The browser changes its buffered ranges at a seek (a new one starts
+    // there) and as a download grows or completes, and fires 'progress'
+    // for only some of it: none once a download has stopped. So the ranges
+    // are read again on every event that may follow a change, and drawn
+    // again only when they differ from those drawn (in tenths of seconds).
+    var drawnBuffered = '';
     function showBuffered() {
       var total = duration();
+      var ranges = [];
+      for (var r = 0; r < video.buffered.length; r++) ranges.push(video.buffered.start(r).toFixed(1) + '-' + video.buffered.end(r).toFixed(1));
+      var now = total.toFixed(1) + ':' + ranges.join(',');
+      if (now === drawnBuffered) return;
+      drawnBuffered = now;
       buffered.textContent = '';
       if (!total) return;
       for (var i = 0; i < video.buffered.length; i++) {
@@ -3843,16 +4020,36 @@
 
     // ---- seeking ----
     // One seek at a time, to the latest wanted position (see above).
+    // A position already sought exactly (in flight, or arrived and not
+    // played on from) is not sought again: a click's press and release
+    // both ask for the same position, and on a file with keyframes far
+    // apart a second seek doubles the wait. After a drag that used
+    // fastSeek (the nearest keyframe), the exact seek on release is kept.
+    function alreadySought() {
+      return scrub.issuedExact && scrub.issued === scrub.target &&
+        (video.seeking || Math.abs(video.currentTime - scrub.target) < 0.05);
+    }
     function issueSeek() {
+      var exact = !(scrub.active && typeof video.fastSeek === 'function');
+      if (exact && alreadySought()) { scrub.seekWanted = false; return; }
+      scrub.seekPending = true;
       if (video.seeking) { scrub.seekWanted = true; return; }
       scrub.seekWanted = false;
-      if (scrub.active && typeof video.fastSeek === 'function') video.fastSeek(scrub.target);
-      else video.currentTime = scrub.target;
+      scrub.issued = scrub.target;
+      scrub.issuedExact = exact;
+      if (exact) video.currentTime = scrub.target;
+      else video.fastSeek(scrub.target);
     }
     function onSeeked() {
       if (scrub.seekWanted) { issueSeek(); return; }
-      // The decoded frame is there (near enough while dragging): it replaces the preview.
-      if (!scrub.active || Math.abs(video.currentTime - scrub.target) <= PREVIEW_CLOSE_ENOUGH_SECONDS) preview.hidden = true;
+      scrub.seekPending = false;
+      // The decoded frame is for the latest position (near enough after a
+      // fastSeek while dragging): it replaces the preview. A seek to an
+      // older position never does: it was followed by another (seekWanted).
+      if (!scrub.active || Math.abs(video.currentTime - scrub.target) <= PREVIEW_CLOSE_ENOUGH_SECONDS) {
+        if (!preview.hidden) trace('real', scrub.target, video.currentTime);
+        preview.hidden = true;
+      }
       showPosition();
     }
     function seekTo(seconds) {
@@ -3860,9 +4057,12 @@
       issueSeek();
       showPosition();
     }
+    // From the position shown (the one still being sought, if any), so
+    // quick repeated steps add up instead of each starting again from the
+    // video's older time.
     function seekBy(seconds) {
       wake();
-      seekTo(video.currentTime + seconds);
+      seekTo(shownTime() + seconds);
     }
 
     function timeAtPointer(clientX) {
@@ -3873,13 +4073,14 @@
     // The frame and time above the pointer on the seek bar.
     function showHover(seconds, clientX) {
       var rect = seek.getBoundingClientRect();
-      var frame = storyboardFrameAt(name, seconds);
+      var frame = storyboard && storyboard.frameAt(seconds);
       hoverFrame.hidden = !frame;
       if (frame) {
-        var width = 160, height = Math.round(160 * frame.height / frame.width);
-        hoverFrame.style.width = width + 'px';
-        hoverFrame.style.height = height + 'px';
-        paintStoryboardFrame(hoverFrame, frame, width, height);
+        hoverFrame.style.width = '160px';
+        hoverFrame.style.height = Math.round(160 / frame.aspect) + 'px';
+        paintStoryboardFrame(hoverFrame, frame);
+        shownFrames.hover = frame.index;
+        trace('hover', seconds, frame.index);
       }
       hoverTime.textContent = formatTime(seconds);
       hover.hidden = false;
@@ -3890,17 +4091,26 @@
     // The storyboard frame over the whole picture while dragging, in the
     // box the video's picture fills inside the player.
     function showScrubPreview(seconds) {
-      var frame = storyboardFrameAt(name, seconds);
+      var frame = storyboard && storyboard.frameAt(seconds);
       if (!frame) { preview.hidden = true; return; }
       var boxW = root.clientWidth, boxH = root.clientHeight;
-      var aspect = frame.width / frame.height;
-      var width = Math.min(boxW, boxH * aspect), height = width / aspect;
+      var width = Math.min(boxW, boxH * frame.aspect), height = width / frame.aspect;
       preview.style.left = ((boxW - width) / 2) + 'px';
       preview.style.top = ((boxH - height) / 2) + 'px';
       preview.style.width = width + 'px';
       preview.style.height = height + 'px';
-      paintStoryboardFrame(preview, frame, width, height);
+      paintStoryboardFrame(preview, frame);
       preview.hidden = false;
+      shownFrames.preview = frame.index;
+      trace('preview', seconds, frame.index);
+    }
+
+    // Test hook: with window.__playerTrace an array, every pointer move and
+    // every painted storyboard frame is logged (time, position, frame).
+    function trace(kind, seconds, frameIndex) {
+      if (!Array.isArray(window.__playerTrace)) return;
+      window.__playerTrace.push({ kind: kind, at: performance.now(), seconds: seconds,
+        wanted: storyboard ? storyboard.frameIndexAt(seconds) : null, frame: frameIndex });
     }
 
     function onSeekPointerDown(e) {
@@ -3912,6 +4122,7 @@
       scrub.wasPlaying = !video.paused;
       video.pause();
       wake();
+      if (storyboard) storyboard.prioritize(timeAtPointer(e.clientX));
       scrubTo(timeAtPointer(e.clientX), e.clientX);
     }
     function scrubTo(seconds, clientX) {
@@ -3921,13 +4132,28 @@
       issueSeek();
       showPosition();
     }
+    // Pointer moves come faster than frames: the latest is applied once
+    // per animation frame (the position, the preview, the bubble, the
+    // seek), so a fast drag paints each frame once, for where the pointer
+    // is when the frame is drawn.
     function onSeekPointerMove(e) {
-      var seconds = timeAtPointer(e.clientX);
-      if (scrub.active) scrubTo(seconds, e.clientX);
-      else if (e.pointerType === 'mouse') showHover(seconds, e.clientX);
+      trace('move', timeAtPointer(e.clientX), null);
+      pointerFrame = { clientX: e.clientX, pointerType: e.pointerType };
+      if (pointerFrameRequest === null) pointerFrameRequest = requestAnimationFrame(applyPointerMove);
+    }
+    function applyPointerMove() {
+      pointerFrameRequest = null;
+      var move = pointerFrame;
+      pointerFrame = null;
+      if (!move) return;
+      var seconds = timeAtPointer(move.clientX);
+      if (storyboard) storyboard.prioritize(seconds);
+      if (scrub.active) scrubTo(seconds, move.clientX);
+      else if (move.pointerType === 'mouse') showHover(seconds, move.clientX);
     }
     function onSeekPointerUp(e) {
       if (!scrub.active) return;
+      if (pointerFrameRequest !== null) { cancelAnimationFrame(pointerFrameRequest); pointerFrameRequest = null; pointerFrame = null; }
       scrub.active = false;
       scrub.target = timeAtPointer(e.clientX);
       if (e.pointerType !== 'mouse') hover.hidden = true;
@@ -3987,16 +4213,18 @@
     listen(video, 'click', onPictureClick);
     listen(video, 'play', showPlaying);
     listen(video, 'pause', showPlaying);
-    listen(video, 'timeupdate', showPosition);
+    listen(video, 'timeupdate', function () { showPosition(); showBuffered(); });
+    listen(video, 'suspend', showBuffered);
     listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
     listen(video, 'progress', showBuffered);
     listen(video, 'volumechange', showVolume);
-    listen(video, 'seeked', onSeeked);
+    listen(video, 'seeked', function () { onSeeked(); showBuffered(); });
     listen(seek, 'pointerdown', onSeekPointerDown);
     listen(seek, 'pointermove', onSeekPointerMove);
     listen(seek, 'pointerup', onSeekPointerUp);
     listen(seek, 'pointercancel', onSeekPointerUp);
     listen(seek, 'pointerleave', function () { if (!scrub.active) hover.hidden = true; });
+    listen(seek, 'pointerenter', function (e) { if (storyboard) storyboard.prioritize(timeAtPointer(e.clientX)); });
     listen(seek, 'keydown', onSeekKey);
     listen(playButton, 'click', function () { togglePlayback(); wake(); });
     listen(muteButton, 'click', function () {
@@ -4008,6 +4236,12 @@
       video.muted = video.volume === 0;
     });
     listen(fullscreenButton, 'click', toggleFullscreen);
+    // The storyboard is fetched once the video has its first data, so it
+    // never competes with the start of playback.
+    if (storyboard) {
+      if (video.readyState >= 2) storyboard.start(video.currentTime);
+      else listen(video, 'loadeddata', function () { storyboard.start(video.currentTime); });
+    }
     listen(document, 'fullscreenchange', showFullscreen);
     listen(document, 'webkitfullscreenchange', showFullscreen);
     showPlaying();
@@ -4020,13 +4254,16 @@
       seekBy: seekBy,
       // Test hook: what the controls show.
       state: function () {
-        return { previewShown: !preview.hidden, previewBackground: preview.hidden ? '' : preview.style.backgroundPosition,
-          hoverShown: !hover.hidden, hoverTime: hoverTime.textContent, hoverBackground: hoverFrame.style.backgroundPosition,
+        return { previewShown: !preview.hidden, previewFrame: preview.hidden ? null : shownFrames.preview,
+          hoverShown: !hover.hidden, hoverTime: hoverTime.textContent, hoverFrame: hoverFrame.hidden ? null : shownFrames.hover,
+          storyboard: storyboard ? storyboard.state() : null,
           time: timeText.textContent, idle: root.classList.contains('player-idle'),
           bufferedRanges: buffered.children.length, valueNow: seek.getAttribute('aria-valuenow') };
       },
       destroy: function () {
         if (idleTimer) clearTimeout(idleTimer);
+        if (pointerFrameRequest !== null) cancelAnimationFrame(pointerFrameRequest);
+        if (storyboard) storyboard.destroy();
         listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
         root.remove();
       },

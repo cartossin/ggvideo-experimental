@@ -336,10 +336,11 @@ browsers need to play and seek video.
   per sheet). Pixels are never stretched, as for stills: one tier serves
   every tile in view, the smallest at least as tall as the tallest video
   tile on screen in device pixels (10% tolerated, since justified rows are
-  never exactly a tier's height), scaled down, at most 4x. A tile taller
-  than every tier, or whose video the tier lacks, plays its web copy
-  instead, muted and looping the first 60 s like the mosaics, drawn the
-  same way; at most 8 at once, nearest the window's centre first, freed
+  never exactly a tier's height), scaled down, at most 4x. A video with
+  no tile in that tier (its own picture is smaller) plays the tallest
+  tier it has, all the pixels it has; its sheets count toward the 4. A
+  tile taller than every tier plays its web copy instead, muted and
+  looping the first 60 s like the mosaics, drawn the same way; at most 8 at once, nearest the window's centre first, freed
   as soon as they leave the screen or the grid. Only as a degraded case,
   when the tiles on screen are spread over more than 4 sheets of the
   right tier, a smaller tier plays. A sheet off screen pauses at once and
