@@ -3836,7 +3836,9 @@
 
     // target: the position wanted last; seekWanted: a seek to it waits for
     // the one in flight; seekPending: the video has not got there yet.
-    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false };
+    // issued/issuedExact: the last seek given to the video, and whether exact.
+    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
+      issued: null, issuedExact: false };
     var hoverAt = null;   // { seconds, clientX } of the bubble shown last
     var idleTimer = null;
     var lastPointerType = 'mouse';
@@ -3914,12 +3916,25 @@
 
     // ---- seeking ----
     // One seek at a time, to the latest wanted position (see above).
+    // A position already sought exactly (in flight, or arrived and not
+    // played on from) is not sought again: a click's press and release
+    // both ask for the same position, and on a file with keyframes far
+    // apart a second seek doubles the wait. After a drag that used
+    // fastSeek (the nearest keyframe), the exact seek on release is kept.
+    function alreadySought() {
+      return scrub.issuedExact && scrub.issued === scrub.target &&
+        (video.seeking || Math.abs(video.currentTime - scrub.target) < 0.05);
+    }
     function issueSeek() {
+      var exact = !(scrub.active && typeof video.fastSeek === 'function');
+      if (exact && alreadySought()) { scrub.seekWanted = false; return; }
       scrub.seekPending = true;
       if (video.seeking) { scrub.seekWanted = true; return; }
       scrub.seekWanted = false;
-      if (scrub.active && typeof video.fastSeek === 'function') video.fastSeek(scrub.target);
-      else video.currentTime = scrub.target;
+      scrub.issued = scrub.target;
+      scrub.issuedExact = exact;
+      if (exact) video.currentTime = scrub.target;
+      else video.fastSeek(scrub.target);
     }
     function onSeeked() {
       if (scrub.seekWanted) { issueSeek(); return; }
