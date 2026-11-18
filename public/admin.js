@@ -754,15 +754,29 @@ async function pollQueue() {
   setTimeout(pollQueue, QUEUE_POLL_MS);
 }
 
+// What is left of the video work in all folders ({ clips, sheets, web }
+// from the server), '' when there is none. It runs after the photos, and
+// for thousands of videos it takes hours, so the bar must not say Idle.
+function videoWorkText(video) {
+  if (!video) return '';
+  const left = [];
+  if (video.clips > 0) left.push('previews of ' + plural(video.clips, 'video'));
+  if (video.sheets > 0) left.push(plural(video.sheets, 'mosaic sheet'));
+  if (video.web > 0) left.push(plural(video.web, 'playable copy').replace(/copys$/, 'copies'));
+  return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : '';
+}
+
 function renderQueue(queue) {
   const status = byId('queueStatus');
-  const busy = queue.remaining > 0 || queue.rescanning.length > 0 || queue.rebuilding.length > 0;
+  const videoWork = videoWorkText(queue.video);
+  const busy = queue.remaining > 0 || videoWork !== '' || queue.rescanning.length > 0 || queue.rebuilding.length > 0;
   const parts = [];
   if (queue.remaining > 0) {
     let text = 'Building ' + plural(queue.remaining, 'image');
     if (queue.etaSeconds != null) text += ', ' + durationText(queue.etaSeconds) + ' left';
     parts.push(text);
   }
+  if (videoWork) parts.push(videoWork);
   for (const folder of queue.rescanning) {
     parts.push(folder === '' ? 'Rescanning all folders' : 'Rescanning ' + folder + '/ with subfolders');
   }
