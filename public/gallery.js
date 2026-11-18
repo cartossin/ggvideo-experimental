@@ -225,7 +225,7 @@
   function reloadIsAwaited() { return waitingForFirstBuild || buildReplaced || trashAwaitsBuild(); }
 
   // The folder's video work (the answer's video object: preview clips,
-  // mosaic sheets, web copies) goes on long after its photos are built,
+  // mosaic sheets, web copies, storyboards) goes on long after its photos are built,
   // hours for thousands of videos. What is left of it, '' when nothing is.
   var VIDEO_WORK_POLL_MS = 10000;
   var videoWorkSeen = false;       // an answer of this page said video work was running
@@ -235,6 +235,7 @@
     if (video.clipsRemaining > 0) left.push('previews of ' + video.clipsRemaining + ' video' + (video.clipsRemaining === 1 ? '' : 's'));
     if (video.sheetsRemaining > 0) left.push(video.sheetsRemaining + ' mosaic sheet' + (video.sheetsRemaining === 1 ? '' : 's'));
     if (video.webRemaining > 0) left.push(video.webRemaining + ' playable cop' + (video.webRemaining === 1 ? 'y' : 'ies'));
+    if (video.storyboardsRemaining > 0) left.push(video.storyboardsRemaining + ' storyboard' + (video.storyboardsRemaining === 1 ? '' : 's'));
     return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : 'Preparing videos…';
   }
   // A request that gets no answer (network down, server restarting, an HTTP

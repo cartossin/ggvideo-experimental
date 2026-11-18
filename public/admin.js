@@ -754,15 +754,17 @@ async function pollQueue() {
   setTimeout(pollQueue, QUEUE_POLL_MS);
 }
 
-// What is left of the video work in all folders ({ clips, sheets, web }
-// from the server), '' when there is none. It runs after the photos, and
-// for thousands of videos it takes hours, so the bar must not say Idle.
+// What is left of the video work in all folders ({ clips, sheets, web,
+// storyboards } from the server), '' when there is none. It runs after the
+// photos, and for thousands of videos it takes hours, so the bar must not
+// say Idle.
 function videoWorkText(video) {
   if (!video) return '';
   const left = [];
   if (video.clips > 0) left.push('previews of ' + plural(video.clips, 'video'));
   if (video.sheets > 0) left.push(plural(video.sheets, 'mosaic sheet'));
   if (video.web > 0) left.push(plural(video.web, 'playable copy').replace(/copys$/, 'copies'));
+  if (video.storyboards > 0) left.push(plural(video.storyboards, 'storyboard'));
   return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : '';
 }
 
