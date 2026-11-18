@@ -250,7 +250,17 @@ What the server makes for each video, in this order:
    minute; shorter ones are kept (a short copy is a few megabytes the
    browser holds whole).
 
-Steps 2 and 3 run after the folder's build is committed, in a queue of
+4. **Storyboard.** For the player's seek bar: frames across the whole
+   video, 160 px tall, one a second up to 1,000 frames (then one every
+   2, 3, ... s; a 2 h film gets one every 8 s, 987 frames), packed 10 x 10
+   in AVIF sheets `gg/<name>.sb<k>.avif`, listed in the manifest as
+   `storyboard: { interval, count, width, height, columns, rows, sheets }`
+   (the exact contract is at the top of `lib/storyboard.js`). Made from
+   the web copy after every web copy, by decoding only its keyframes
+   (every web copy of a video over a minute has one each second): the 2 h
+   film in about a minute, 3.2 MB. Videos under 30 s get none.
+
+Steps 2 to 4 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
 working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
 (one single-threaded vips), a preview clip job 3 (its decoder thread,
@@ -301,9 +311,10 @@ up to 6 hours, 8 times;
 one that failed because of the file waits for a rescan or a new file.
 
 What the page gets: the manifest (`gg/_manifest.json`) has
-`videos: { "<name>": { duration, web, hasAudio, width, height } }` for every
-video ffmpeg can read (`web` is the web copy's file name in `gg/`, or null
-until it is made; `width` and `height` are the displayed size) and
+`videos: { "<name>": { duration, web, hasAudio, width, height, storyboard } }`
+for every video ffmpeg can read (`web` is the web copy's file name in
+`gg/`, or null until it is made; `width` and `height` are the displayed
+size; `storyboard` is described below, or null) and
 `videoAtlasDir` (`video_<id>`, or null while there is no atlas). The folder
 page sets `videos` and `videoAtlas` (the `_video.json` contents plus `dir`)
 next to `spriteMeta`. The build-status poll (`?build-status`) keeps its
