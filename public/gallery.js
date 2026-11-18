@@ -2652,13 +2652,34 @@
 
     // The sheets of a tier that these on-screen tiles would play; counting
     // stops once there are more than `limit`.
+    // Where a video's tile is drawn from when the view's tier is
+    // tierHeight: that tier, or, when the video has no tile there (its own
+    // picture is smaller than the tier's tiles: a null in tiles, see
+    // lib/video_atlas.js), the tallest tier below that has one, since its
+    // pixels are all the video has. Every video has a tile in the smallest
+    // tier. Returns { tierHeight, rect, sheet } or null when the tile is
+    // not drawn from a mosaic (too small for it, taller than every tier,
+    // or a video the atlas lacks).
+    function mosaicSourceOf(t, atlasIndex, tierHeight, dpr) {
+      if (atlasIndex === undefined || tierHeight === null) return null;
+      for (var i = tierHeights.indexOf(tierHeight); i >= 0; i--) {
+        var tier = atlas.tiers['h' + tierHeights[i]];
+        var rect = tier.tiles[atlasIndex];
+        if (!rect) continue;
+        var sheet = tier.sheets[rect[0]];
+        return sheet && movesAt(t, rect, tierHeights[i], dpr) ? { tierHeight: tierHeights[i], rect: rect, sheet: sheet } : null;
+      }
+      return null;
+    }
+
+    // The sheets these on-screen tiles would play with the view's tier
+    // tierHeight, its videos' tallest tiers below it included; counting
+    // stops once there are more than `limit`.
     function sheetsNeeded(onScreen, tierHeight, dpr, limit) {
-      var tiles = atlas.tiers['h' + tierHeight].tiles;
       var sheets = new Set();
       for (var i = 0; i < onScreen.length && sheets.size <= limit; i++) {
-        if (onScreen[i].atlasIndex === undefined) continue;
-        var rect = tiles[onScreen[i].atlasIndex];
-        if (movesAt(onScreen[i].t, rect, tierHeight, dpr)) sheets.add(rect[0]);
+        var source = mosaicSourceOf(onScreen[i].t, onScreen[i].atlasIndex, tierHeight, dpr);
+        if (source) sheets.add(sheetKey(source.tierHeight, source.rect[0]));
       }
       return sheets;
     }
@@ -2700,25 +2721,23 @@
     function collectSheetsInBuffer(dpr, tierHeight) {
       counters.collects++;
       sheetsInBuffer = new Map();
-      var tier = tierHeight === null ? null : atlas.tiers['h' + tierHeight];
       var perSheet = new Map();
       var bufferBottom = bufferTop + bufferH;
       for (var i = firstTileIndexAtOrBelow(bufferTop); i < lastTileRects.length; i++) {
         var t = lastTileRects[i];
         if (t.y > bufferBottom) break;
         if (!isVideoName(t.name)) continue;
-        var atlasIndex = atlasIndexByName.get(t.name);
-        var rect = tier && atlasIndex !== undefined ? tier.tiles[atlasIndex] : null;   // [sheetIndex, x, y, width, height]
-        var sheet = rect && tier.sheets[rect[0]];
-        if (!sheet || !movesAt(t, rect, tierHeight, dpr)) {
-          if (playsWebCopy(t, rect, dpr)) addWebCopyTile(perSheet, t);
+        var source = mosaicSourceOf(t, atlasIndexByName.get(t.name), tierHeight, dpr);
+        if (!source) {
+          if (playsWebCopy(t, dpr)) addWebCopyTile(perSheet, t);
           continue;
         }
-        var key = sheetKey(tierHeight, rect[0]);
+        var rect = source.rect, sheet = source.sheet;   // rect: [sheetIndex, x, y, width, height]
+        var key = sheetKey(source.tierHeight, rect[0]);
         var entry = perSheet.get(key);
         if (!entry) { entry = { sheet: sheet, tiles: [], sources: [], values: [] }; perSheet.set(key, entry); }
         entry.tiles.push(t);
-        entry.sources.push({ width: rect[3], height: rect[4] });
+        entry.sources.push({ width: rect[3], height: rect[4], videoTallest: source.tierHeight !== tierHeight });
         entry.values.push(t.x, t.y - glOriginY, t.w, t.h,
           rect[1] / sheet.width, rect[2] / sheet.height, rect[3] / sheet.width, rect[4] / sheet.height);
       }
@@ -2748,14 +2767,10 @@
     }
 
     // Whether a video tile not drawn from a mosaic plays its web copy: it is
-    // taller than every tier, or the view's tier does not have its video
-    // (an atlas without it at all included). Not while the view stays
-    // posters because too many sheets are on screen, and not before the
+    // taller than every tier (an atlas without it at all included), and the
     // copy exists.
-    function playsWebCopy(t, rect, dpr) {
-      if (!window.videos[t.name].web) return false;
-      if (tierForTileHeight(heightNeeded(t, dpr)) === null) return true;
-      return chosenTier !== null && !rect;
+    function playsWebCopy(t, dpr) {
+      return !!window.videos[t.name].web && tierForTileHeight(heightNeeded(t, dpr)) === null;
     }
 
     function addWebCopyTile(perSheet, t) {
@@ -2771,13 +2786,10 @@
     // chosen tier.
     function tilesOnScreenBySheet(onScreen, dpr) {
       var counts = new Map();
-      if (chosenTier === null) return counts;
-      var tiles = atlas.tiers['h' + chosenTier].tiles;
       for (var i = 0; i < onScreen.length; i++) {
-        if (onScreen[i].atlasIndex === undefined) continue;
-        var rect = tiles[onScreen[i].atlasIndex];
-        if (!movesAt(onScreen[i].t, rect, chosenTier, dpr)) continue;
-        var key = sheetKey(chosenTier, rect[0]);
+        var source = mosaicSourceOf(onScreen[i].t, onScreen[i].atlasIndex, chosenTier, dpr);
+        if (!source) continue;
+        var key = sheetKey(source.tierHeight, source.rect[0]);
         if (sheetsInBuffer.has(key)) counts.set(key, (counts.get(key) || 0) + 1);
       }
       return counts;
@@ -3055,7 +3067,7 @@
           if (t.y < bottom && t.y + t.h > top) {
             var source = entry.sources[i] || { width: player.video.videoWidth, height: player.video.videoHeight };
             drawn.push({ name: t.name, deviceW: t.w * dpr, deviceH: t.h * dpr, source: key,
-              sourceW: source.width, sourceH: source.height });
+              sourceW: source.width, sourceH: source.height, videoTallest: !!source.videoTallest });
           }
         });
       });
