@@ -2779,7 +2779,7 @@
       if (perSheet.has(key)) return;
       // The whole frame, which has the poster's shape (the web copy is
       // made at the video's displayed size, square pixels).
-      perSheet.set(key, { webName: window.videos[t.name].web, tiles: [t], sources: [null],
+      perSheet.set(key, { webName: window.videos[t.name].web, webVersion: window.videos[t.name].webVersion, tiles: [t], sources: [null],
         values: [t.x, t.y - glOriginY, t.w, t.h, 0, 0, 1, 1] });
     }
 
@@ -2922,7 +2922,7 @@
       // A sheet that cannot be fetched or decoded shows posters; it is not
       // asked for again, so a failure costs one request, not one per frame.
       video.addEventListener('error', function () { failPlayer(player); });
-      video.src = entry.webName ? webCopyURL(entry.webName) : sheetURL(entry.sheet);
+      video.src = entry.webName ? webCopyURL(entry.webName, entry.webVersion) : sheetURL(entry.sheet);
       players.set(key, player);
       return player;
     }
@@ -3668,7 +3668,7 @@
 
   function storyboardSheetURL(info, sheetIndex) {
     var sheet = info.sheets[sheetIndex];
-    return sheet ? folderURL + GG_DIR + '/' + encodeURIComponent(sheet) : null;
+    return sheet ? folderURL + GG_DIR + '/' + encodeURIComponent(sheet) + (info.version ? '?v=' + encodeURIComponent(info.version) : '') : null;
   }
 
   // ---- a storyboard ready for scrubbing ----
@@ -4291,7 +4291,11 @@
   function isVideoName(name) {
     return !!name && !!window.videos && Object.prototype.hasOwnProperty.call(window.videos, name);
   }
-  function webCopyURL(webName) { return folderURL + GG_DIR + '/' + encodeURIComponent(webName); }
+  // version: the manifest's webVersion; with it in the URL the server lets
+  // the copy be cached for good (a copy made again has another version).
+  function webCopyURL(webName, version) {
+    return folderURL + GG_DIR + '/' + encodeURIComponent(webName) + (version ? '?v=' + encodeURIComponent(version) : '');
+  }
   function motionReduced() {
     return !!window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
@@ -4355,7 +4359,7 @@
     element.addEventListener('webkitendfullscreen', scheduleRender);
     placeMainVideo();
     var web = window.videos[name].web;
-    if (web) setMainVideoSource(webCopyURL(web));
+    if (web) setMainVideoSource(webCopyURL(web, window.videos[name].webVersion));
     else awaitWebCopy();
   }
 
