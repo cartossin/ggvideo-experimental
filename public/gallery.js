@@ -3948,9 +3948,12 @@
       issueSeek();
       showPosition();
     }
+    // From the position shown (the one still being sought, if any), so
+    // quick repeated steps add up instead of each starting again from the
+    // video's older time.
     function seekBy(seconds) {
       wake();
-      seekTo(video.currentTime + seconds);
+      seekTo(shownTime() + seconds);
     }
 
     function timeAtPointer(clientX) {
