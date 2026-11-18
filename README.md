@@ -236,9 +236,19 @@ What the server makes for each video, in this order:
 3. **Web copy.** `gg/<name>.web.mp4`: H.264 High, yuv420p, AAC stereo (or no
    sound if the video has none), the index at the front of the file
    (faststart), at most `VIDEO_WEB_MAX_HEIGHT` (1080) lines on the short
-   side and never upscaled, frame rate kept (at most 60). A video that is
-   already H.264 of that kind is copied rather than encoded again (only its
-   sound is converted if it is not AAC stereo).
+   side and never upscaled, frame rate kept (at most 60), and a keyframe
+   at least every second (two, if copied), so a seek anywhere starts at
+   most a second or two of video before its target: the browser fetches and decodes from the
+   keyframe before the time asked for, so keyframes 10 s apart (x264's
+   default, and common in downloaded films) made seeking fast or slow by
+   where it landed. A video that is already H.264 of that kind is copied
+   rather than encoded again (only its sound is converted if it is not AAC
+   stereo), but only when its own keyframes are at most 2 s apart
+   (measured on five 30-second windows of the file, in under half a
+   second) or it is a minute long at most; otherwise it is encoded. Web
+   copies made before this rule are made again for videos longer than a
+   minute; shorter ones are kept (a short copy is a few megabytes the
+   browser holds whole).
 
 Steps 2 and 3 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
@@ -358,10 +368,12 @@ Measured on a 16-thread container (one Proxmox LXC):
   3.8 MB (h100) and 10 MB (h200, 3360x416); preview clips take about 2 MB
   per video.
 - A web copy costs a full decode and H.264 encode of the video (`-preset
-  medium -crf 21`) unless it can be copied: an 11-minute 1024x576 MPEG-4
-  AVI took 115 s, 10 s of 1080p HEVC or AV1 about 11 s (with two other
-  encodes running), while a 10-minute 1080p H.264 MP4 was copied in 24 s
-  (its sound converted to stereo). Disk: about the size of a 1080p H.264
+  faster -crf 21`, a keyframe a second) unless it can be copied: a 2 h
+  11 min 1080p film (1920x800) at about 3x real time with the 6 encoder
+  threads of CPU budget 16, about 45 min and 4.3 GB (its stream copy, with
+  keyframes up to 10 s apart, was 8.1 GB in 3 min). A keyframe a second
+  costs 10 to 27% more than x264's default spacing on the films measured
+  (lib/videos.js), and halves the worst seek against two seconds. Disk: about the size of a 1080p H.264
   file of the same length per video, plus the clips and the mosaics.
 - ffprobe runs on every video at every rebuild of its folder that finds it
   new or changed; a poster costs a few seconds of decoding.
