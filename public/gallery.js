@@ -223,6 +223,20 @@
   var afterReplacedBuildGivenUp = null;
 
   function reloadIsAwaited() { return waitingForFirstBuild || buildReplaced || trashAwaitsBuild(); }
+
+  // The folder's video work (the answer's video object: preview clips,
+  // mosaic sheets, web copies) goes on long after its photos are built,
+  // hours for thousands of videos. What is left of it, '' when nothing is.
+  var VIDEO_WORK_POLL_MS = 10000;
+  var videoWorkSeen = false;       // an answer of this page said video work was running
+  function videoWorkMessage(video) {
+    if (!video || !video.building) return '';
+    var left = [];
+    if (video.clipsRemaining > 0) left.push('previews of ' + video.clipsRemaining + ' video' + (video.clipsRemaining === 1 ? '' : 's'));
+    if (video.sheetsRemaining > 0) left.push(video.sheetsRemaining + ' mosaic sheet' + (video.sheetsRemaining === 1 ? '' : 's'));
+    if (video.webRemaining > 0) left.push(video.webRemaining + ' playable cop' + (video.webRemaining === 1 ? 'y' : 'ies'));
+    return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : 'Preparing videos…';
+  }
   // A request that gets no answer (network down, server restarting, an HTTP
   // error) is asked again after these delays; then the page says so and stops.
   var BUILD_STATUS_RETRY_DELAYS_MS = [2000, 4000, 8000, 16000];
@@ -341,6 +355,16 @@
     } else if (buildReplaced) {
       buildPoll.finished = true;
       reloadOntoCurrentBuild();
+    } else if (videoWorkMessage(status.video)) {
+      // The photos and posters are built; the folder's videos are still
+      // being prepared. The page says what is left and keeps asking.
+      videoWorkSeen = true;
+      setBuildMessage(videoWorkMessage(status.video));
+      scheduleBuildStatusPoll(VIDEO_WORK_POLL_MS);
+    } else if (videoWorkSeen && status.video && status.video.atlasReady && !window.videoAtlas) {
+      // The moving tiles were finished while this page was open; it was
+      // rendered without them. Reloading is the reader's choice.
+      setBuildMessage('The videos are ready. Reload the page to see them move.');
     } else {
       setBuildMessage('');
     }
