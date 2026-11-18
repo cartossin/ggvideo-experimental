@@ -205,14 +205,19 @@ What the server makes for each video, in this order:
 2. **Preview clips and the video atlas.** Each video's first
    `VIDEO_PREVIEW_SECONDS` (60), or its whole seconds when shorter, without
    sound, at a constant `VIDEO_PREVIEW_FPS` (24), scaled to each tier's
-   tile height (`VIDEO_TIERS`: 25, 50, 100 and 200 px; wider than 4:1 is
-   shrunk to 4:1) are cached as small clips in `gg/`, with a keyframe at
-   every second. All of a folder's clips are then packed into mosaic
+   tile height (`VIDEO_TIERS`: 25, 50, 100, 200 and 400 px; wider than
+   4:1 is shrunk to 4:1) are cached as small clips in `gg/`, with a
+   keyframe at every second. A video has no tile in a tier taller than
+   its own picture (a 360p video none in h400): the viewer shows the
+   smallest tier at least as large as the tile on screen and scales it
+   down, so no tile is ever an enlargement; above a video's tallest tier
+   its pixels are all there is. All of a folder's clips are then packed into mosaic
    videos, one or more per tier, each exactly 60 s long so they all loop
    together; a shorter video loops inside its tile. A mosaic is limited
    only by its 3840x2160 frame (hardware decoding works everywhere up to
    that, at 30 fps): about 4,600 h25 tiles of 16:9 video, 1,480 h50, 400
-   h100 or 104 h200, so 10,000 videos fill 3 h25 sheets. Each tile is
+   h100, 104 h200 or 25 h400 (35 of 4:3), so 10,000 videos fill 3 h25
+   sheets. Each tile is
    surrounded by 4 px of its own edge pixels so compression never mixes
    neighbours. A viewer plays one mosaic per tier, uploads it to a WebGL
    texture each frame and cuts tiles out of it. The layout is in
@@ -231,11 +236,32 @@ What the server makes for each video, in this order:
 3. **Web copy.** `gg/<name>.web.mp4`: H.264 High, yuv420p, AAC stereo (or no
    sound if the video has none), the index at the front of the file
    (faststart), at most `VIDEO_WEB_MAX_HEIGHT` (1080) lines on the short
-   side and never upscaled, frame rate kept (at most 60). A video that is
-   already H.264 of that kind is copied rather than encoded again (only its
-   sound is converted if it is not AAC stereo).
+   side and never upscaled, frame rate kept (at most 60), and a keyframe
+   at least every second (two, if copied), so a seek anywhere starts at
+   most a second or two of video before its target: the browser fetches and decodes from the
+   keyframe before the time asked for, so keyframes 10 s apart (x264's
+   default, and common in downloaded films) made seeking fast or slow by
+   where it landed. A video that is already H.264 of that kind is copied
+   rather than encoded again (only its sound is converted if it is not AAC
+   stereo), but only when its own keyframes are at most 2 s apart
+   (measured on five 30-second windows of the file, in under half a
+   second) or it is a minute long at most; otherwise it is encoded. Web
+   copies made before this rule are made again for videos longer than a
+   minute; shorter ones are kept (a short copy is a few megabytes the
+   browser holds whole).
 
-Steps 2 and 3 run after the folder's build is committed, in a queue of
+4. **Storyboard.** For the player's seek bar: frames across the whole
+   video, 160 px tall, one a second up to 1,000 frames (then one every
+   2, 3, ... s; a 2 h film gets one every 8 s, 987 frames), packed 10 x 10
+   in AVIF sheets `gg/<name>.sb<k>.avif`, listed in the manifest as
+   `storyboard: { interval, count, width, height, columns, rows, sheets }`
+   (the exact contract is at the top of `lib/storyboard.js`). Made from
+   the web copy after every web copy, by decoding only its keyframes
+   (every web copy of a video over a minute has one each second): the 2 h
+   film (from its present 8 GB copy) in 80 s and 2.9 MB, a 12 min 720p
+   film in 29 s and 4.0 MB. Videos under 30 s get none.
+
+Steps 2 to 4 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
 working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
 (one single-threaded vips), a preview clip job 3 (its decoder thread,
@@ -272,7 +298,10 @@ frame rate) or a new version encodes mosaics differently, each folder's
 atlas is made again the next time its video work runs (at startup, at
 latest): only missing clip tiers are made (one more pass over each video's
 first minute for a new tier), sheets whose content is unchanged are
-reused, and web copies and posters are not touched. This version's clips
+reused, and web copies and posters are not touched. Adding a tier keeps
+every tile of the other tiers in its place (the layout is kept across
+tier changes), so only that tier's clips and sheets are made; the old
+atlas is served until the new one is committed. This version's clips
 have a keyframe every second, which earlier clips lack, so after upgrading
 every clip is made once more.
 
@@ -283,9 +312,10 @@ up to 6 hours, 8 times;
 one that failed because of the file waits for a rescan or a new file.
 
 What the page gets: the manifest (`gg/_manifest.json`) has
-`videos: { "<name>": { duration, web, hasAudio, width, height } }` for every
-video ffmpeg can read (`web` is the web copy's file name in `gg/`, or null
-until it is made; `width` and `height` are the displayed size) and
+`videos: { "<name>": { duration, web, hasAudio, width, height, storyboard } }`
+for every video ffmpeg can read (`web` is the web copy's file name in
+`gg/`, or null until it is made; `width` and `height` are the displayed
+size; `storyboard` is described below, or null) and
 `videoAtlasDir` (`video_<id>`, or null while there is no atlas). The folder
 page sets `videos` and `videoAtlas` (the `_video.json` contents plus `dir`)
 next to `spriteMeta`. The build-status poll (`?build-status`) keeps its
@@ -369,10 +399,12 @@ Measured on a 16-thread container (one Proxmox LXC):
   3.8 MB (h100) and 10 MB (h200, 3360x416); preview clips take about 2 MB
   per video.
 - A web copy costs a full decode and H.264 encode of the video (`-preset
-  medium -crf 21`) unless it can be copied: an 11-minute 1024x576 MPEG-4
-  AVI took 115 s, 10 s of 1080p HEVC or AV1 about 11 s (with two other
-  encodes running), while a 10-minute 1080p H.264 MP4 was copied in 24 s
-  (its sound converted to stereo). Disk: about the size of a 1080p H.264
+  faster -crf 21`, a keyframe a second) unless it can be copied: a 2 h
+  11 min 1080p film (1920x800) at about 3x real time with the 6 encoder
+  threads of CPU budget 16, about 45 min and 4.3 GB (its stream copy, with
+  keyframes up to 10 s apart, was 8.1 GB in 3 min). A keyframe a second
+  costs 10 to 27% more than x264's default spacing on the films measured
+  (lib/videos.js), and halves the worst seek against two seconds. Disk: about the size of a 1080p H.264
   file of the same length per video, plus the clips and the mosaics.
 - ffprobe runs on every video at every rebuild of its folder that finds it
   new or changed; a poster costs a few seconds of decoding.
@@ -507,7 +539,7 @@ is refused as ambiguous).
 | `VIPS_CONCURRENCY` | `1` | Threads inside each vips process. Builds run several processes instead (`BUILD_CONCURRENCY`) |
 | `VIDEO_PREVIEW_SECONDS` | `60` | Length of every mosaic, and of the part of each video it shows (2 to 600) |
 | `VIDEO_PREVIEW_FPS` | `24` | Frame rate of the mosaics (1 to 30) |
-| `VIDEO_TIERS` | `25,50,100,200` | Tile heights of the video atlas, 16 to 1080, at most six |
+| `VIDEO_TIERS` | `25,50,100,200,400` | Tile heights of the video atlas, 16 to 1080, at most six |
 | `VIDEO_MOSAIC_MEMORY` | `512MiB` | Frame buffers of one mosaic being made (two chunks of whole seconds, at least one second each) |
 | `VIDEO_RETRY_SECONDS` | `300` | A clip or web copy that failed for a passing reason (out of tasks, memory or disk; ffmpeg killed) is tried again after this, then at doubling intervals up to 6 hours, 8 times; a failed atlas after twice this |
 | `VIDEO_WEB_MAX_HEIGHT` | `1080` | Short side of the web copy at most (the long side at most 16:9 of it); never upscaled |
