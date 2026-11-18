@@ -446,21 +446,30 @@
 
   // ---------- keys ----------
   function keycheck(e) {
-    // Don't hijack typing in inputs / textareas / contenteditable.
-    var tn = e.target && e.target.tagName;
-    if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' ||
-        (e.target && e.target.isContentEditable)) return;
+    var target = e.target;
+    var tn = target && target.tagName;
     var k = e.which || e.keyCode;
+    // Don't hijack typing in inputs / textareas / contenteditable. A range
+    // input (the player's volume) keeps its arrows, but Escape still leaves.
+    if (tn === 'TEXTAREA' || tn === 'SELECT' || (target && target.isContentEditable)) return;
+    if (tn === 'INPUT' && !(target.type === 'range' && k === 27)) return;
+    // A focused button (the player's) acts on Space and Enter itself.
+    if (tn === 'BUTTON' && (k === 32 || k === 13)) return;
 
-    // Space plays or pauses the open video. The player never has the keys
-    // (keepKeysOnPage), so the page does what its Space would.
+    // Space plays or pauses the open video, wherever the focus is.
     if (k === 32 && focusedIdx > 0 && toggleMainVideoPlayback()) {
       e.preventDefault();
       return;
     }
-    // In fullscreen the browser's Escape ends the fullscreen; the page
-    // does nothing else with keys there.
-    if (videoIsFullscreen()) return;
+    // In fullscreen the browser's Escape ends the fullscreen and the
+    // arrows seek (as in the browser's own player); nothing else.
+    if (videoIsFullscreen()) {
+      if ((k === 37 || k === 39) && mainVideo) {
+        e.preventDefault();
+        mainVideo.controls.seekBy(k === 37 ? -SEEK_STEP_SECONDS : SEEK_STEP_SECONDS);
+      }
+      return;
+    }
 
     // Grid view: route scroll keys to native browser handling by ensuring
     // #thumbs has focus. We don't preventDefault and we don't scroll ourselves —
@@ -824,8 +833,8 @@
       if (!mainVideo) return null;
       var element = mainVideo.element;
       return { name: mainVideo.name, src: element.getAttribute('src'), currentTime: element.currentTime,
-        paused: element.paused, muted: element.muted, poster: element.poster,
-        note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
+        paused: element.paused, muted: element.muted, poster: element.poster, nativeControls: element.controls,
+        controls: mainVideo.controls.state(), note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
     },
     // Scroll mapping: layout height, spacer height, ratio, the layout y at
     // the viewport top and the photo whose row is there.
@@ -2401,15 +2410,6 @@
       return gridRenderer.hasTexture(TEXTURE_KEY);
     }
 
-    // 75 -> "1:15", 3725 -> "1:02:05"; "" when the duration is unknown.
-    function durationText(seconds) {
-      if (!(seconds > 0)) return '';
-      var total = Math.max(1, Math.round(seconds));
-      var h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, s = total % 60;
-      var mm = h > 0 && m < 10 ? '0' + m : String(m);
-      return (h > 0 ? h + ':' : '') + mm + ':' + (s < 10 ? '0' : '') + s;
-    }
-
     // One quad from glyph cell `cell` (the background patch is sampled
     // away from its edges, so it stays solid when stretched).
     function pushQuad(values, x, y, w, h, cell, inset) {
@@ -2419,7 +2419,7 @@
 
     function pushBadge(values, t, dpr) {
       if (t.h < MIN_TILE_H || t.w < MIN_TILE_W) return;
-      var text = durationText(window.videos[t.name].duration);
+      var text = formatDuration(window.videos[t.name].duration);
       var textW = 0;
       for (var i = 0; i < text.length; i++) textW += glyphs.cells[text[i]].w / glyphs.scale;
       var fullW = PAD + TRIANGLE_W + (text ? GAP + textW : 0) + PAD;
@@ -3638,10 +3638,405 @@
     return { bitmap: bitmap, sx: cell.sx, sy: cell.sy, sw: cell.sw, sh: cell.sh, natW: loc.w, natH: CANONICAL_H };
   }
 
+  // ---- storyboards ------------------------------------------------------
+  // Frames sampled over a whole video, packed in sprite sheets, for the
+  // seek bar's previews. The player asks one question:
+  //   storyboardFrameAt(name, seconds) -> { url, x, y, width, height,
+  //     sheetWidth, sheetHeight } (a frame's rectangle in its sheet), or
+  //   null when the video has none.
+  // The server's contract is not final; until then this reads
+  // window.videos[name].storyboard shaped as (provisional):
+  //   { interval: seconds between frames (frame i shows i * interval),
+  //     count, frameWidth, frameHeight, columns, rows,
+  //     sheets: [file name in gg/, ...] (columns x rows frames each, row
+  //     by row) }
+  // and this function is the one place to change when the contract lands.
+  function storyboardFrameAt(name, seconds) {
+    var info = isVideoName(name) && window.videos[name].storyboard;
+    if (!info || !(info.interval > 0) || !(info.count > 0) || !info.sheets || !info.sheets.length) return null;
+    var index = Math.min(info.count - 1, Math.max(0, Math.floor(seconds / info.interval)));
+    var perSheet = info.columns * info.rows;
+    var sheet = info.sheets[Math.floor(index / perSheet)];
+    if (!sheet) return null;
+    var inSheet = index % perSheet;
+    return {
+      url: folderURL + GG_DIR + '/' + encodeURIComponent(sheet),
+      x: (inSheet % info.columns) * info.frameWidth,
+      y: Math.floor(inSheet / info.columns) * info.frameHeight,
+      width: info.frameWidth,
+      height: info.frameHeight,
+      sheetWidth: info.columns * info.frameWidth,
+      sheetHeight: info.rows * info.frameHeight,
+    };
+  }
+
+  // Shows `frame` in `element` (a block width x height CSS px) as its
+  // background: the sheet scaled so that one frame fills the block.
+  function paintStoryboardFrame(element, frame, width, height) {
+    var scaleX = width / frame.width, scaleY = height / frame.height;
+    element.style.backgroundImage = 'url("' + frame.url + '")';
+    element.style.backgroundSize = (frame.sheetWidth * scaleX) + 'px ' + (frame.sheetHeight * scaleY) + 'px';
+    element.style.backgroundPosition = (-frame.x * scaleX) + 'px ' + (-frame.y * scaleY) + 'px';
+  }
+
+  // 75 -> "1:15", 3725 -> "1:02:05"; "" when the duration is unknown.
+  function formatDuration(seconds) {
+    if (!(seconds > 0)) return '';
+    var total = Math.max(1, Math.round(seconds));
+    var h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, s = total % 60;
+    var mm = h > 0 && m < 10 ? '0' + m : String(m);
+    return (h > 0 ? h + ':' : '') + mm + ':' + (s < 10 ? '0' : '') + s;
+  }
+  // A position in a video, 0 included: "0:00".
+  function formatTime(seconds) {
+    return seconds >= 0.5 ? formatDuration(seconds) : '0:00';
+  }
+
+  // ---- the opened video's controls --------------------------------------
+  // Our own controls instead of the browser's: play/pause, a seek bar with
+  // the buffered ranges, time / duration, mute and volume, fullscreen.
+  // Plain DOM; the player's root is the box the video fills, and is what
+  // goes fullscreen, so the controls come along.
+  //
+  // The seek bar is a WAI-ARIA slider (a <div role="slider">, not an
+  // <input type="range">, whose track cannot show buffered ranges or a
+  // preview without per-browser pseudo-element styling). Hovering it shows
+  // the storyboard frame and the time above the pointer. Dragging shows the
+  // storyboard frame at once over the whole picture, scaled up, until the
+  // video has decoded the real frame there: that is what makes seeking feel
+  // instant before the decoder catches up. While dragging, the video seeks
+  // continuously but one seek at a time: a new seek is issued only once
+  // the previous one has finished ('seeked'), to the latest position, with
+  // fastSeek() where it exists (Safari, Firefox: the nearest keyframe,
+  // fast), currentTime elsewhere; on release, an exact seek to the
+  // position. Issuing a seek per pointer move instead makes each one cancel
+  // the last, and the picture never catches up until the drag stops.
+  var CONTROLS_IDLE_MS = 2500;      // controls fade after this long without a pointer or key while playing
+  var SEEK_STEP_SECONDS = 5;        // arrow keys on the seek bar, and in fullscreen
+  var PREVIEW_CLOSE_ENOUGH_SECONDS = 0.5;  // a decoded frame this near the drag position replaces the preview
+
+  var PLAYER_ICONS = {
+    play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>',
+    sound: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zM15.5 8.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2z"/></svg>',
+    muted: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zM16 9.4l1.4-1.4 2.1 2.1 2.1-2.1L23 9.4 20.9 11.5 23 13.6 21.6 15l-2.1-2.1-2.1 2.1L16 13.6l2.1-2.1z"/></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z"/></svg>',
+    exitFullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h2v6H4V8h4zM14 4h2v4h4v2h-6zM4 14h6v6H8v-4H4zM14 14h6v2h-4v4h-2z"/></svg>',
+  };
+
+  function playerElement(tag, className, parent) {
+    var element = document.createElement(tag);
+    element.className = className;
+    if (parent) parent.appendChild(element);
+    return element;
+  }
+  function playerButton(className, parent) {
+    var button = playerElement('button', 'player-button ' + className, parent);
+    button.type = 'button';
+    return button;
+  }
+
+  // The controls of `video` for the video named `name`. Returns
+  // { root, seekBy(seconds), destroy(), state() }.
+  function createVideoControls(video, name) {
+    var root = playerElement('div', 'main-player');
+    root.appendChild(video);
+    var preview = playerElement('div', 'player-scrub-preview', root);
+    preview.hidden = true;
+    var bar = playerElement('div', 'player-controls', root);
+    var seek = playerElement('div', 'player-seek', bar);
+    seek.setAttribute('role', 'slider');
+    seek.setAttribute('aria-label', 'Seek');
+    seek.setAttribute('aria-valuemin', '0');
+    seek.tabIndex = 0;
+    var track = playerElement('div', 'player-seek-track', seek);
+    var buffered = playerElement('div', 'player-buffered', track);
+    var played = playerElement('div', 'player-played', track);
+    var thumb = playerElement('div', 'player-seek-thumb', seek);
+    var hover = playerElement('div', 'player-hover', seek);
+    hover.hidden = true;
+    var hoverFrame = playerElement('div', 'player-hover-frame', hover);
+    var hoverTime = playerElement('div', 'player-hover-time', hover);
+    var row = playerElement('div', 'player-row', bar);
+    var playButton = playerButton('player-play', row);
+    var timeText = playerElement('span', 'player-time', row);
+    playerElement('span', 'player-spacer', row);
+    var muteButton = playerButton('player-mute', row);
+    var volume = playerElement('input', 'player-volume', row);
+    volume.type = 'range';
+    volume.min = '0';
+    volume.max = '1';
+    volume.step = '0.05';
+    volume.setAttribute('aria-label', 'Volume');
+    var fullscreenButton = playerButton('player-fullscreen', row);
+
+    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false };
+    var idleTimer = null;
+    var lastPointerType = 'mouse';
+    var listeners = [];
+
+    function listen(target, type, handler, options) {
+      target.addEventListener(type, handler, options);
+      listeners.push([target, type, handler, options]);
+    }
+
+    function duration() {
+      if (isFinite(video.duration) && video.duration > 0) return video.duration;
+      var known = isVideoName(name) && window.videos[name].duration;
+      return known > 0 ? known : 0;
+    }
+    function fraction(seconds) { var d = duration(); return d ? Math.min(1, Math.max(0, seconds / d)) : 0; }
+    function shownTime() { return scrub.active ? scrub.target : video.currentTime; }
+
+    // ---- showing state ----
+    function showPosition() {
+      var now = shownTime();
+      var percent = (fraction(now) * 100) + '%';
+      played.style.width = percent;
+      thumb.style.left = percent;
+      var total = duration();
+      timeText.textContent = formatTime(now) + ' / ' + (total ? formatDuration(total) : '–:––');
+      seek.setAttribute('aria-valuemax', String(Math.round(total)));
+      seek.setAttribute('aria-valuenow', String(Math.round(now)));
+      seek.setAttribute('aria-valuetext', formatTime(now) + ' of ' + (total ? formatDuration(total) : 'unknown'));
+    }
+    function showBuffered() {
+      var total = duration();
+      buffered.textContent = '';
+      if (!total) return;
+      for (var i = 0; i < video.buffered.length; i++) {
+        var range = playerElement('span', 'player-buffered-range', buffered);
+        range.style.left = (fraction(video.buffered.start(i)) * 100) + '%';
+        range.style.width = ((fraction(video.buffered.end(i)) - fraction(video.buffered.start(i))) * 100) + '%';
+      }
+    }
+    function showPlaying() {
+      var playing = !video.paused;
+      playButton.innerHTML = playing ? PLAYER_ICONS.pause : PLAYER_ICONS.play;
+      playButton.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+      if (playing) scheduleIdle(); else wake();
+    }
+    function showVolume() {
+      var silent = video.muted || video.volume === 0;
+      muteButton.innerHTML = silent ? PLAYER_ICONS.muted : PLAYER_ICONS.sound;
+      muteButton.setAttribute('aria-label', silent ? 'Unmute' : 'Mute');
+      volume.value = String(video.muted ? 0 : video.volume);
+    }
+    function showFullscreen() {
+      var full = document.fullscreenElement === root || document.webkitFullscreenElement === root;
+      fullscreenButton.innerHTML = full ? PLAYER_ICONS.exitFullscreen : PLAYER_ICONS.fullscreen;
+      fullscreenButton.setAttribute('aria-label', full ? 'Exit full screen' : 'Full screen');
+    }
+
+    // ---- fading when idle ----
+    function wake() {
+      root.classList.remove('player-idle');
+      scheduleIdle();
+    }
+    function scheduleIdle() {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () {
+        idleTimer = null;
+        if (!video.paused && !scrub.active) root.classList.add('player-idle');
+      }, CONTROLS_IDLE_MS);
+    }
+
+    // ---- seeking ----
+    // One seek at a time, to the latest wanted position (see above).
+    function issueSeek() {
+      if (video.seeking) { scrub.seekWanted = true; return; }
+      scrub.seekWanted = false;
+      if (scrub.active && typeof video.fastSeek === 'function') video.fastSeek(scrub.target);
+      else video.currentTime = scrub.target;
+    }
+    function onSeeked() {
+      if (scrub.seekWanted) { issueSeek(); return; }
+      // The decoded frame is there (near enough while dragging): it replaces the preview.
+      if (!scrub.active || Math.abs(video.currentTime - scrub.target) <= PREVIEW_CLOSE_ENOUGH_SECONDS) preview.hidden = true;
+      showPosition();
+    }
+    function seekTo(seconds) {
+      scrub.target = Math.min(duration() || 0, Math.max(0, seconds));
+      issueSeek();
+      showPosition();
+    }
+    function seekBy(seconds) {
+      wake();
+      seekTo(video.currentTime + seconds);
+    }
+
+    function timeAtPointer(clientX) {
+      var rect = seek.getBoundingClientRect();
+      return rect.width ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) * duration() : 0;
+    }
+
+    // The frame and time above the pointer on the seek bar.
+    function showHover(seconds, clientX) {
+      var rect = seek.getBoundingClientRect();
+      var frame = storyboardFrameAt(name, seconds);
+      hoverFrame.hidden = !frame;
+      if (frame) {
+        var width = 160, height = Math.round(160 * frame.height / frame.width);
+        hoverFrame.style.width = width + 'px';
+        hoverFrame.style.height = height + 'px';
+        paintStoryboardFrame(hoverFrame, frame, width, height);
+      }
+      hoverTime.textContent = formatTime(seconds);
+      hover.hidden = false;
+      var half = hover.offsetWidth / 2;
+      hover.style.left = Math.min(rect.width - half, Math.max(half, clientX - rect.left)) + 'px';
+    }
+
+    // The storyboard frame over the whole picture while dragging, in the
+    // box the video's picture fills inside the player.
+    function showScrubPreview(seconds) {
+      var frame = storyboardFrameAt(name, seconds);
+      if (!frame) { preview.hidden = true; return; }
+      var boxW = root.clientWidth, boxH = root.clientHeight;
+      var aspect = frame.width / frame.height;
+      var width = Math.min(boxW, boxH * aspect), height = width / aspect;
+      preview.style.left = ((boxW - width) / 2) + 'px';
+      preview.style.top = ((boxH - height) / 2) + 'px';
+      preview.style.width = width + 'px';
+      preview.style.height = height + 'px';
+      paintStoryboardFrame(preview, frame, width, height);
+      preview.hidden = false;
+    }
+
+    function onSeekPointerDown(e) {
+      if (e.button !== 0 || !duration()) return;
+      e.preventDefault();
+      lastPointerType = e.pointerType;
+      seek.setPointerCapture(e.pointerId);
+      scrub.active = true;
+      scrub.wasPlaying = !video.paused;
+      video.pause();
+      wake();
+      scrubTo(timeAtPointer(e.clientX), e.clientX);
+    }
+    function scrubTo(seconds, clientX) {
+      scrub.target = seconds;
+      showScrubPreview(seconds);
+      showHover(seconds, clientX);
+      issueSeek();
+      showPosition();
+    }
+    function onSeekPointerMove(e) {
+      var seconds = timeAtPointer(e.clientX);
+      if (scrub.active) scrubTo(seconds, e.clientX);
+      else if (e.pointerType === 'mouse') showHover(seconds, e.clientX);
+    }
+    function onSeekPointerUp(e) {
+      if (!scrub.active) return;
+      scrub.active = false;
+      scrub.target = timeAtPointer(e.clientX);
+      if (e.pointerType !== 'mouse') hover.hidden = true;
+      issueSeek();   // not active any more: an exact seek
+      if (scrub.wasPlaying) {
+        var playing = video.play();
+        if (playing && playing.catch) playing.catch(function () {});
+      }
+      showPosition();
+    }
+    function onSeekKey(e) {
+      var step = { 37: -SEEK_STEP_SECONDS, 39: SEEK_STEP_SECONDS, 33: duration() / 10, 34: -duration() / 10 }[e.keyCode];
+      if (e.keyCode === 36) seekTo(0);
+      else if (e.keyCode === 35) seekTo(duration());
+      else if (step) seekBy(step);
+      else return;
+      // The seek bar's arrows seek; they do not move to another item.
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    // ---- buttons ----
+    function togglePlayback() {
+      if (video.paused) {
+        var playing = video.play();
+        if (playing && playing.catch) playing.catch(function () {});
+      } else {
+        video.pause();
+      }
+    }
+    function toggleFullscreen() {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else if (root.requestFullscreen) {
+        root.requestFullscreen().catch(function () {});
+      } else if (root.webkitRequestFullscreen) {
+        root.webkitRequestFullscreen();
+      } else if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen();   // iPhone: only the video itself, in the system's player
+      }
+    }
+    // A click on the picture plays or pauses; a tap shows the controls
+    // first when they have faded, and hides them otherwise.
+    function onPictureClick() {
+      if (lastPointerType !== 'mouse') {
+        if (root.classList.contains('player-idle')) wake();
+        else if (!video.paused) root.classList.add('player-idle');
+        return;
+      }
+      togglePlayback();
+      wake();
+    }
+
+    listen(root, 'pointermove', function (e) { lastPointerType = e.pointerType; if (e.pointerType === 'mouse') wake(); });
+    listen(root, 'pointerdown', function (e) { lastPointerType = e.pointerType; });
+    listen(root, 'keydown', wake);
+    listen(video, 'click', onPictureClick);
+    listen(video, 'play', showPlaying);
+    listen(video, 'pause', showPlaying);
+    listen(video, 'timeupdate', showPosition);
+    listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
+    listen(video, 'progress', showBuffered);
+    listen(video, 'volumechange', showVolume);
+    listen(video, 'seeked', onSeeked);
+    listen(seek, 'pointerdown', onSeekPointerDown);
+    listen(seek, 'pointermove', onSeekPointerMove);
+    listen(seek, 'pointerup', onSeekPointerUp);
+    listen(seek, 'pointercancel', onSeekPointerUp);
+    listen(seek, 'pointerleave', function () { if (!scrub.active) hover.hidden = true; });
+    listen(seek, 'keydown', onSeekKey);
+    listen(playButton, 'click', function () { togglePlayback(); wake(); });
+    listen(muteButton, 'click', function () {
+      video.muted = !video.muted;
+      if (!video.muted && video.volume === 0) video.volume = 1;
+    });
+    listen(volume, 'input', function () {
+      video.volume = Number(volume.value);
+      video.muted = video.volume === 0;
+    });
+    listen(fullscreenButton, 'click', toggleFullscreen);
+    listen(document, 'fullscreenchange', showFullscreen);
+    listen(document, 'webkitfullscreenchange', showFullscreen);
+    showPlaying();
+    showVolume();
+    showFullscreen();
+    showPosition();
+
+    return {
+      root: root,
+      seekBy: seekBy,
+      // Test hook: what the controls show.
+      state: function () {
+        return { previewShown: !preview.hidden, previewBackground: preview.hidden ? '' : preview.style.backgroundPosition,
+          hoverShown: !hover.hidden, hoverTime: hoverTime.textContent, hoverBackground: hoverFrame.style.backgroundPosition,
+          time: timeText.textContent, idle: root.classList.contains('player-idle'),
+          bufferedRanges: buffered.children.length, valueNow: seek.getAttribute('aria-valuenow') };
+      },
+      destroy: function () {
+        if (idleTimer) clearTimeout(idleTimer);
+        listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
+        root.remove();
+      },
+    };
+  }
+
   // ---- photo view: a video ---------------------------------------------
   // An open video plays its web copy (H.264/AAC, made by the server) in a
-  // native <video controls>, laid over the main canvas in the box a photo
-  // of its shape fills. The canvas paints the poster under it as it does
+  // <video> with our controls (createVideoControls), laid over the main
+  // canvas in the box a photo of its shape fills. The canvas paints the poster under it as it does
   // for a photo, and the element shows the same poster until it has a
   // frame. The element is made only once the view has settled on the
   // video, so a film strip moving past videos does not load each one.
@@ -3695,7 +4090,6 @@
   function openMainVideo(name) {
     var element = document.createElement('video');
     element.className = 'main-video';
-    element.controls = true;
     element.playsInline = true;
     element.preload = 'auto';
     element.poster = posterURLFor(name);
@@ -3708,7 +4102,8 @@
     originalLink.href = folderURL + encodeURIComponent(name);
     originalLink.download = name;
     originalLink.textContent = 'Download original';
-    var opened = { name: name, element: element, note: note, originalLink: originalLink,
+    var controls = createVideoControls(element, name);
+    var opened = { name: name, element: element, controls: controls, note: note, originalLink: originalLink,
       awaitingWebCopy: false, probing: false, idleAnswers: 0 };
     mainVideo = opened;
     element.addEventListener('error', function () {
@@ -3718,7 +4113,6 @@
         showMainVideoNote('This video cannot be played in this browser. Download the original to watch it.');
       }
     });
-    element.addEventListener('focus', keepKeysOnPage);
     // iOS plays fullscreen in its own player; the view is laid out again
     // when it closes, as it is after a page's fullscreen (startjs).
     element.addEventListener('webkitendfullscreen', scheduleRender);
@@ -3744,15 +4138,17 @@
     var thumbsEl = $('thumbs');
     var g = mainImageGeom();
     if (!mainVideo || !thumbsEl || !g) return;
-    var parts = [mainVideo.element, mainVideo.note, mainVideo.originalLink];
+    var parts = [mainVideo.controls.root, mainVideo.note, mainVideo.originalLink];
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].parentNode !== thumbsEl) thumbsEl.appendChild(parts[i]);
     }
-    var style = mainVideo.element.style;
-    style.left = g.dx + 'px';
-    style.top = g.dy + 'px';
-    style.width = g.dw + 'px';
-    style.height = g.dh + 'px';
+    // As custom properties, so that the stylesheet's :fullscreen rule (the
+    // whole screen) wins over them while the player is fullscreen.
+    var style = mainVideo.controls.root.style;
+    style.setProperty('--player-left', g.dx + 'px');
+    style.setProperty('--player-top', g.dy + 'px');
+    style.setProperty('--player-width', g.dw + 'px');
+    style.setProperty('--player-height', g.dh + 'px');
     mainVideo.note.style.top = (g.dy + g.dh / 2) + 'px';
   }
 
@@ -3767,18 +4163,6 @@
     if (motionReduced()) return;
     var playing = element.play();
     if (playing && playing.catch) playing.catch(function () {});
-  }
-
-  // Chrome's player keeps every key its controls receive: once a click on
-  // them (play, the timeline) has focused one, no key reaches the page, so
-  // the arrows and Escape stopped working. Focus goes back to #thumbs, the
-  // page's key target, whenever the player takes it (the click itself
-  // still acts); keycheck does what the player's Space would. Not in
-  // fullscreen, where the player's own keys are the ones wanted.
-  function keepKeysOnPage() {
-    if (videoIsFullscreen()) return;
-    var thumbsEl = $('thumbs');
-    if (thumbsEl) thumbsEl.focus({ preventScroll: true });
   }
 
   // Space on the photo view of a playable video. False when there is none.
@@ -3848,7 +4232,7 @@
     closing.element.pause();
     closing.element.removeAttribute('src');
     closing.element.load();
-    closing.element.remove();
+    closing.controls.destroy();
     closing.note.remove();
     closing.originalLink.remove();
   }

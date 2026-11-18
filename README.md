@@ -322,12 +322,22 @@ browsers need to play and seek video.
   a touch screen: after a tap on the tab), every video tile at least 60
   px high and 40 wide shows a small badge with a play triangle and its
   duration; otherwise there is no badge at all.
-- **Opening a video** shows a native `<video controls>` over the poster, in
-  the box a photo would fill, playing the web copy (with sound, if the
-  browser lets the page start it; otherwise it waits for a click), and a
-  "Download original" link. Without a web copy yet, the poster and a note
-  stay until the build-status poll finds it. Arrows, the film strip,
-  Escape and history work as for photos; leaving stops playback.
+- **Opening a video** shows the web copy over the poster, in the box a
+  photo would fill, with the viewer's own controls (no browser controls):
+  play/pause, a seek bar with the buffered ranges, time and duration,
+  mute and volume, full screen, and a "Download original" link. It plays
+  with sound if the browser lets the page start it (otherwise it waits for
+  a click), not by itself under `prefers-reduced-motion`. Hovering the seek
+  bar shows the time there and, when the video has a storyboard (frames
+  sampled over the whole video in sprite sheets), that frame; dragging
+  shows the frame over the picture at once, until the video has decoded
+  the real one, and seeks while dragging, one seek at a time (`fastSeek`
+  where the browser has it), then exactly where released. The controls
+  fade after 2.5 s without the pointer while playing. Space plays and
+  pauses; the arrows move between items as for photos, and seek 5 s on a
+  focused seek bar and in full screen; Escape returns to the grid. Without
+  a web copy yet, the poster and a note stay until the build-status poll
+  finds it. Leaving stops playback.
 
 ### Cost
 

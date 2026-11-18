@@ -198,16 +198,110 @@ html, body { overflow-x: hidden; }
 .zoom-control .zoom-label { min-width: 80px; text-align: center; color: var(--fg); }
 .zoom-control .zoom-back { padding: 4px 14px; }
 
-/* Photo view of a video (gallery.js openMainVideo): the native player over
+/* Photo view of a video (gallery.js openMainVideo): the player over
    the main canvas, in the box a photo would fill (JS sets left, top, width,
    height), a note over it while it cannot play, and a link to the original
    in the top-right corner, styled like the page's other notices. */
-.main-video {
+.main-player {
   position: absolute;
-  display: block;
-  object-fit: contain;
+  left: var(--player-left);
+  top: var(--player-top);
+  width: var(--player-width);
+  height: var(--player-height);
   z-index: 2;
+  overflow: hidden;
+  background: transparent;
 }
+.main-player:fullscreen {
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+.main-player.player-idle { cursor: none; }
+.main-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+/* The storyboard frame shown over the picture while the seek bar is dragged. */
+.player-scrub-preview {
+  position: absolute;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.player-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 18px 12px 6px;
+  background: linear-gradient(transparent, rgba(0,0,0,.7));
+  color: #eee;
+  font-size: 13px;
+  transition: opacity 300ms ease;
+}
+.player-idle .player-controls { opacity: 0; pointer-events: none; }
+.player-row { display: flex; align-items: center; gap: 6px; }
+.player-spacer { flex: 1; }
+.player-time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.player-button {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px;
+  min-width: 36px;
+  min-height: 36px;
+  color: #eee;
+  touch-action: manipulation;
+}
+.player-button:hover { background: rgba(255,255,255,.15); color: #fff; }
+.player-button svg { display: block; width: 22px; height: 22px; fill: currentColor; }
+.player-volume { width: 90px; accent-color: #eee; }
+/* The seek bar: a tall hit area around a thin track. */
+.player-seek {
+  position: relative;
+  height: 18px;
+  cursor: pointer;
+  touch-action: none;
+}
+.player-seek:focus-visible { outline: 2px solid #eee; outline-offset: 2px; }
+.player-seek-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,.25);
+  overflow: hidden;
+}
+.player-buffered-range { position: absolute; top: 0; bottom: 0; background: rgba(255,255,255,.35); }
+.player-played { position: absolute; left: 0; top: 0; bottom: 0; background: #eee; }
+.player-seek-thumb {
+  position: absolute;
+  top: 3px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
+  background: #fff;
+}
+.player-hover {
+  position: absolute;
+  bottom: 22px;
+  transform: translateX(-50%);
+  padding: 3px;
+  border-radius: 6px;
+  background: #262626;
+  box-shadow: 0 2px 8px rgba(0,0,0,.6);
+  text-align: center;
+  pointer-events: none;
+}
+.player-hover-frame { background-repeat: no-repeat; border-radius: 3px; }
+.player-hover-time { padding: 2px 4px 0; font-variant-numeric: tabular-nums; }
 .main-video-note {
   position: absolute;
   left: 50%;
