@@ -4031,7 +4031,15 @@
     }
     function issueSeek() {
       var exact = !(scrub.active && typeof video.fastSeek === 'function');
-      if (exact && alreadySought()) { scrub.seekWanted = false; return; }
+      if (exact && alreadySought()) {
+        scrub.seekWanted = false;
+        // No seek, so no 'seeked' will come to take the preview away: the
+        // video already shows this position (a pointer move that does not
+        // change it, up or down on the bar, or held still), and a preview
+        // left over it would hide the playing picture.
+        if (!video.seeking) preview.hidden = true;
+        return;
+      }
       scrub.seekPending = true;
       if (video.seeking) { scrub.seekWanted = true; return; }
       scrub.seekWanted = false;
