@@ -258,7 +258,8 @@ What the server makes for each video, in this order:
    (the exact contract is at the top of `lib/storyboard.js`). Made from
    the web copy after every web copy, by decoding only its keyframes
    (every web copy of a video over a minute has one each second): the 2 h
-   film in about a minute, 3.2 MB. Videos under 30 s get none.
+   film (from its present 8 GB copy) in 80 s and 2.9 MB, a 12 min 720p
+   film in 29 s and 4.0 MB. Videos under 30 s get none.
 
 Steps 2 to 4 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
