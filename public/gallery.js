@@ -3834,7 +3834,9 @@
     volume.setAttribute('aria-label', 'Volume');
     var fullscreenButton = playerButton('player-fullscreen', row);
 
-    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false };
+    // target: the position wanted last; seekWanted: a seek to it waits for
+    // the one in flight; seekPending: the video has not got there yet.
+    var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false };
     var hoverAt = null;   // { seconds, clientX } of the bubble shown last
     var idleTimer = null;
     var lastPointerType = 'mouse';
@@ -3851,7 +3853,11 @@
       return known > 0 ? known : 0;
     }
     function fraction(seconds) { var d = duration(); return d ? Math.min(1, Math.max(0, seconds / d)) : 0; }
-    function shownTime() { return scrub.active ? scrub.target : video.currentTime; }
+    // The position the bar and the time show: where the visitor is
+    // dragging, or the position a seek is still on its way to (queued
+    // behind another, or in flight: the video's currentTime is then the
+    // older seek's), else where the video is.
+    function shownTime() { return scrub.active || scrub.seekPending ? scrub.target : video.currentTime; }
 
     // ---- showing state ----
     function showPosition() {
@@ -3909,6 +3915,7 @@
     // ---- seeking ----
     // One seek at a time, to the latest wanted position (see above).
     function issueSeek() {
+      scrub.seekPending = true;
       if (video.seeking) { scrub.seekWanted = true; return; }
       scrub.seekWanted = false;
       if (scrub.active && typeof video.fastSeek === 'function') video.fastSeek(scrub.target);
@@ -3916,6 +3923,7 @@
     }
     function onSeeked() {
       if (scrub.seekWanted) { issueSeek(); return; }
+      scrub.seekPending = false;
       // The decoded frame is there (near enough while dragging): it replaces the preview.
       if (!scrub.active || Math.abs(video.currentTime - scrub.target) <= PREVIEW_CLOSE_ENOUGH_SECONDS) preview.hidden = true;
       showPosition();
