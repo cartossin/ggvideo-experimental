@@ -3640,35 +3640,86 @@
 
   // ---- storyboards ------------------------------------------------------
   // Frames sampled over a whole video, packed in sprite sheets, for the
-  // seek bar's previews. The player asks one question:
+  // seek bar's previews (the contract is at the top of lib/storyboard.js).
+  // window.videos[name].storyboard is null (none yet, or a video under
+  // 30 s) or { interval, count, width, height, columns, rows, sheets }:
+  // frame i shows time i * interval, in sheets[floor(i / (columns * rows))]
+  // at column i % columns and row floor(i / columns) % rows, width x height;
+  // the last sheet has only the rows its frames need. The player asks one
+  // question:
   //   storyboardFrameAt(name, seconds) -> { url, x, y, width, height,
-  //     sheetWidth, sheetHeight } (a frame's rectangle in its sheet), or
-  //   null when the video has none.
-  // The server's contract is not final; until then this reads
-  // window.videos[name].storyboard shaped as (provisional):
-  //   { interval: seconds between frames (frame i shows i * interval),
-  //     count, frameWidth, frameHeight, columns, rows,
-  //     sheets: [file name in gg/, ...] (columns x rows frames each, row
-  //     by row) }
-  // and this function is the one place to change when the contract lands.
-  function storyboardFrameAt(name, seconds) {
+  //     sheetWidth, sheetHeight, sheetIndex } (the nearest frame's
+  //     rectangle in its sheet), or null when the video has none.
+  function storyboardOf(name) {
     var info = isVideoName(name) && window.videos[name].storyboard;
-    if (!info || !(info.interval > 0) || !(info.count > 0) || !info.sheets || !info.sheets.length) return null;
-    var index = Math.min(info.count - 1, Math.max(0, Math.floor(seconds / info.interval)));
+    var usable = info && info.interval > 0 && info.count > 0 && info.width > 0 && info.height > 0 &&
+      info.columns > 0 && info.rows > 0 && info.sheets && info.sheets.length;
+    return usable ? info : null;
+  }
+
+  function storyboardSheetURL(info, sheetIndex) {
+    var sheet = info.sheets[sheetIndex];
+    return sheet ? folderURL + GG_DIR + '/' + encodeURIComponent(sheet) : null;
+  }
+
+  function storyboardFrameAt(name, seconds) {
+    var info = storyboardOf(name);
+    if (!info) return null;
+    var index = Math.min(info.count - 1, Math.max(0, Math.round(seconds / info.interval)));
     var perSheet = info.columns * info.rows;
-    var sheet = info.sheets[Math.floor(index / perSheet)];
-    if (!sheet) return null;
-    var inSheet = index % perSheet;
+    var sheetIndex = Math.floor(index / perSheet);
+    var url = storyboardSheetURL(info, sheetIndex);
+    if (!url) return null;
+    var framesInSheet = Math.min(perSheet, info.count - sheetIndex * perSheet);
     return {
-      url: folderURL + GG_DIR + '/' + encodeURIComponent(sheet),
-      x: (inSheet % info.columns) * info.frameWidth,
-      y: Math.floor(inSheet / info.columns) * info.frameHeight,
-      width: info.frameWidth,
-      height: info.frameHeight,
-      sheetWidth: info.columns * info.frameWidth,
-      sheetHeight: info.rows * info.frameHeight,
+      url: url,
+      sheetIndex: sheetIndex,
+      x: (index % info.columns) * info.width,
+      y: (Math.floor(index / info.columns) % info.rows) * info.height,
+      width: info.width,
+      height: info.height,
+      sheetWidth: info.columns * info.width,
+      sheetHeight: Math.ceil(framesInSheet / info.columns) * info.height,
     };
   }
+
+  // Storyboard sheets are fetched one at a time, as the seek bar reaches
+  // them (a 2 h film has ten, about 300 KB each), never all at once: the
+  // sheet under the pointer, and its neighbours warmed in the background
+  // so a drag across a sheet boundary finds the next one ready. Nothing
+  // waits for them: until a sheet has arrived, the bubble shows the time
+  // alone and dragging shows the video itself.
+  var storyboardSheets = new Map();   // url -> { image, ready, whenReady: [callbacks] }
+  function storyboardSheet(url) {
+    var sheet = storyboardSheets.get(url);
+    if (sheet) return sheet;
+    sheet = { image: new Image(), ready: false, whenReady: [] };
+    sheet.image.decoding = 'async';
+    sheet.image.onload = function () {
+      sheet.ready = true;
+      sheet.whenReady.splice(0).forEach(function (callback) { callback(); });
+    };
+    sheet.image.src = url;
+    storyboardSheets.set(url, sheet);
+    return sheet;
+  }
+  // The frame for `seconds` if its sheet has arrived (and its neighbours
+  // asked for), else null, and then onArrival() runs once it has.
+  function readyStoryboardFrame(name, seconds, onArrival) {
+    var frame = storyboardFrameAt(name, seconds);
+    if (!frame) return null;
+    var info = storyboardOf(name);
+    [frame.sheetIndex - 1, frame.sheetIndex + 1].forEach(function (neighbour) {
+      var url = storyboardSheetURL(info, neighbour);
+      if (url) storyboardSheet(url);
+    });
+    var sheet = storyboardSheet(frame.url);
+    if (sheet.ready) return frame;
+    if (onArrival && sheet.whenReady.indexOf(onArrival) < 0) sheet.whenReady.push(onArrival);
+    return null;
+  }
+  // Forgets the sheets of a closed video (the browser keeps its cache).
+  function forgetStoryboardSheets() { storyboardSheets.clear(); }
 
   // Shows `frame` in `element` (a block width x height CSS px) as its
   // background: the sheet scaled so that one frame fills the block.
@@ -3771,6 +3822,7 @@
     var fullscreenButton = playerButton('player-fullscreen', row);
 
     var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false };
+    var hoverAt = null;   // { seconds, clientX } of the bubble shown last
     var idleTimer = null;
     var lastPointerType = 'mouse';
     var listeners = [];
@@ -3873,7 +3925,8 @@
     // The frame and time above the pointer on the seek bar.
     function showHover(seconds, clientX) {
       var rect = seek.getBoundingClientRect();
-      var frame = storyboardFrameAt(name, seconds);
+      hoverAt = { seconds: seconds, clientX: clientX };
+      var frame = readyStoryboardFrame(name, seconds, refreshHover);
       hoverFrame.hidden = !frame;
       if (frame) {
         var width = 160, height = Math.round(160 * frame.height / frame.width);
@@ -3887,10 +3940,14 @@
       hover.style.left = Math.min(rect.width - half, Math.max(half, clientX - rect.left)) + 'px';
     }
 
+    // A sheet that arrives while it is wanted is shown at once.
+    function refreshHover() { if (!hover.hidden && hoverAt) showHover(hoverAt.seconds, hoverAt.clientX); }
+    function refreshScrubPreview() { if (scrub.active) showScrubPreview(scrub.target); }
+
     // The storyboard frame over the whole picture while dragging, in the
     // box the video's picture fills inside the player.
     function showScrubPreview(seconds) {
-      var frame = storyboardFrameAt(name, seconds);
+      var frame = readyStoryboardFrame(name, seconds, refreshScrubPreview);
       if (!frame) { preview.hidden = true; return; }
       var boxW = root.clientWidth, boxH = root.clientHeight;
       var aspect = frame.width / frame.height;
@@ -4027,6 +4084,7 @@
       },
       destroy: function () {
         if (idleTimer) clearTimeout(idleTimer);
+        forgetStoryboardSheets();
         listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
         root.remove();
       },
