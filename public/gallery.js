@@ -3867,7 +3867,8 @@
   // the last, and the picture never catches up until the drag stops.
   var CONTROLS_IDLE_MS = 2500;      // controls fade after this long without a pointer or key while playing
   var SEEK_STEP_SECONDS = 5;        // arrow keys on the seek bar, and in fullscreen
-  var PREVIEW_CLOSE_ENOUGH_SECONDS = 0.5;  // a decoded frame this near the drag position replaces the preview
+  var PREVIEW_CLOSE_ENOUGH_SECONDS = 0.5;
+  var END_OF_VIDEO_SECONDS = 0.25;         // a drag released this near the end leaves the video there  // a decoded frame this near the drag position replaces the preview
 
   var PLAYER_ICONS = {
     play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
@@ -4166,7 +4167,9 @@
       scrub.target = timeAtPointer(e.clientX);
       if (e.pointerType !== 'mouse') hover.hidden = true;
       issueSeek();   // not active any more: an exact seek
-      if (scrub.wasPlaying) {
+      // Playing again after the drag, unless it was released at the very
+      // end: play() on an ended video starts it again from the beginning.
+      if (scrub.wasPlaying && scrub.target < duration() - END_OF_VIDEO_SECONDS) {
         var playing = video.play();
         if (playing && playing.catch) playing.catch(function () {});
       }
