@@ -3927,12 +3927,13 @@
 
     // target: the position wanted last; seekWanted: a seek to it waits for
     // the one in flight; seekPending: the video has not got there yet.
-    // issued/issuedExact: the last seek given to the video, and whether exact.
+    // issued/issuedExact: the last seek given to the video, and whether exact;
+    // taken: the video began it ('seeking' came).
     var storyboard = createStoryboardLoader(name);
     var pointerFrame = null;   // { clientX, pointerType } waiting for the next animation frame
     var pointerFrameRequest = null;
     var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
-      issued: null, issuedExact: false };
+      issued: null, issuedExact: false, taken: false };
     var shownFrames = { hover: null, preview: null };   // storyboard frame indexes painted last (test hook)
     var idleTimer = null;
     var lastPointerType = 'mouse';
@@ -4046,8 +4047,21 @@
       scrub.seekWanted = false;
       scrub.issued = scrub.target;
       scrub.issuedExact = exact;
+      scrub.taken = false;
       if (exact) video.currentTime = scrub.target;
       else video.fastSeek(scrub.target);
+    }
+    // A video with nothing to seek in yet drops a seek without 'seeking'
+    // or 'seeked' (the seeking steps of HTML end there; Safari on an
+    // iPhone loads nothing before the first play, so a drag before it is
+    // dropped whole). Nothing would then end the wait for 'seeked': the
+    // bar would stay at the position and the preview over the picture
+    // while the video played from the start underneath. The position is
+    // asked for again each time the video has more to seek in.
+    function seekAgainIfDropped() {
+      if (!scrub.seekPending || scrub.taken || video.seeking) return;
+      scrub.issued = null;
+      issueSeek();
     }
     function onSeeked() {
       if (scrub.seekWanted) { issueSeek(); return; }
@@ -4229,7 +4243,9 @@
     listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
     listen(video, 'progress', showBuffered);
     listen(video, 'volumechange', showVolume);
+    listen(video, 'seeking', function () { scrub.taken = true; });
     listen(video, 'seeked', function () { onSeeked(); showBuffered(); });
+    ['loadedmetadata', 'loadeddata', 'canplay', 'playing'].forEach(function (type) { listen(video, type, seekAgainIfDropped); });
     listen(seek, 'pointerdown', onSeekPointerDown);
     listen(seek, 'pointermove', onSeekPointerMove);
     listen(seek, 'pointerup', onSeekPointerUp);
