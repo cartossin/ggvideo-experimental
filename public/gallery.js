@@ -831,13 +831,17 @@
     // The grid's video sheets: which play, which have a frame on the GPU.
     movingTiles: function () { return movingTiles.stats(); },
     // The opened video (of the photo view or the player view), or null.
-    // view: 'photo' or 'player'; controls: null without our controls.
+    // view: 'photo' or 'player'; controls: null without our controls (the
+    // photo view); playButton: whether the photo view's is shown (null in
+    // the player view).
     mainVideo: function () {
       if (!mainVideo) return null;
       var element = mainVideo.element;
       return { view: mainVideo.view, name: mainVideo.name, src: element.getAttribute('src'), currentTime: element.currentTime,
-        paused: element.paused, muted: element.muted, poster: element.poster, nativeControls: element.controls,
+        paused: element.paused, muted: element.muted, loop: element.loop, preload: element.preload,
+        poster: element.poster, nativeControls: element.controls,
         controls: mainVideo.controls ? mainVideo.controls.state() : null,
+        playButton: mainVideo.playButton ? !mainVideo.playButton.hidden : null,
         note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
     },
     // Scroll mapping: layout height, spacer height, ratio, the layout y at
@@ -4302,22 +4306,33 @@
   }
 
   // ---- photo view: a video ---------------------------------------------
-  // An open video plays its web copy (H.264/AAC, made by the server) in a
-  // <video> with our controls (createVideoControls), laid over the main
-  // canvas in the box a photo of its shape fills. The canvas paints the poster under it as it does
-  // for a photo, and the element shows the same poster until it has a
-  // frame. The element is made only once the view has settled on the
-  // video, so a film strip moving past videos does not load each one.
-  // While a video has no web copy yet, the poster stays with a note, and
-  // the build-status poller looks for the copy (checkAwaitedWebCopy).
+  // The photo view is for browsing: a video there is a moving picture,
+  // its web copy (H.264/AAC, made by the server) playing silently and
+  // looping its first PREVIEW_LOOP_SECONDS, with a play button in the
+  // middle that opens the player view (openPlayer), where our controls
+  // are. It is laid over the main canvas in the box a photo of its shape
+  // fills. The canvas paints the poster under it as it does for a photo,
+  // and the element shows the same poster until it has a frame. The
+  // element is made only once the view has settled on the video, so a
+  // film strip moving past videos does not load each one. While a video
+  // has no web copy yet, the poster stays with a note, and the
+  // build-status poller looks for the copy (checkAwaitedWebCopy).
+  //
+  // It plays whatever prefers-reduced-motion says, as the grid's moving
+  // tiles do. Muted, it may start by itself in every browser (iOS
+  // included); one that refuses leaves the poster and the button.
+  // Not the grid's preview clips: the tallest is 400 px, and the photo
+  // view's box is larger; the web copy is the largest picture there is.
+  var PREVIEW_LOOP_SECONDS = 60;
   var MAIN_VIDEO_SETTLE_MS = 200;
   var WEB_COPY_POLL_MS = 4000;
   // Answers saying no video work is running before the page stops waiting
   // for a web copy (the work may not have started yet for the first ones).
   var WEB_COPY_IDLE_ANSWERS = 3;
   // The opened video, of the photo view or of the player view (one at a
-  // time): { view: 'photo' or 'player', name, element, root, controls,
-  // note, originalLink, autoplay, awaitingWebCopy, probing, idleAnswers }.
+  // time): { view: 'photo' or 'player', name, element, root, controls
+  // (player), playButton (photo), note, originalLink, autoplay, failed,
+  // awaitingWebCopy, probing, idleAnswers }.
   // root holds the element (and the controls) and is what is removed on
   // the way out.
   var mainVideo = null;
@@ -4361,20 +4376,41 @@
     if (!mainEl || mainVideo || focusedIdx <= 0 || images[focusedIdx] !== name) return;
     // The film strip is still on its way to the photo the visitor chose.
     if (focusInProgrammaticScroll) { updateMainVideo(); return; }
-    openMainVideo(name);
+    openVideoPreview(name);
   }
 
-  function openMainVideo(name) {
-    var element = createMainVideoElement('main-video');
-    element.preload = 'auto';
+  // The photo view's video: silent, looping, no controls, the play
+  // button over it. The box lets pointers through to the main canvas
+  // under it (a swipe there moves the film strip, as on a photo); only
+  // the button takes them.
+  function openVideoPreview(name) {
+    var box = playerElement('div', 'main-preview');
+    var element = createMainVideoElement('main-video-preview');
+    // defaultMuted is the muted attribute: muted from the start, before
+    // any play(), which is what lets it start by itself.
+    element.defaultMuted = true;
+    element.muted = true;
+    // loop for a video shorter than the preview; a longer one goes back
+    // to the start once past PREVIEW_LOOP_SECONDS.
+    element.loop = true;
+    // Only what the first frame needs until it plays: flipping through
+    // items does not download each one ahead.
+    element.preload = 'metadata';
     var g = mainImageGeom();
     element.poster = posterURLFor(name, g ? g.dh * devicePixelRatio() : CANONICAL_H);
-    var controls = createVideoControls(element, name);
-    var opened = openedVideo('photo', name, element, controls.root);
-    opened.controls = controls;
-    // Sound is on unless the browser says otherwise; no autoplay for a
-    // visitor who asked for reduced motion.
-    opened.autoplay = !motionReduced();
+    box.appendChild(element);
+    var playButton = playerElement('button', 'main-video-play', box);
+    playButton.type = 'button';
+    playButton.innerHTML = PLAYER_ICONS.play;
+    playButton.setAttribute('aria-label', 'Play video');
+    playButton.hidden = true;   // until there is a web copy to play
+    var opened = openedVideo('photo', name, element, box);
+    opened.playButton = playButton;
+    opened.autoplay = true;
+    element.addEventListener('timeupdate', function () {
+      if (element.currentTime >= PREVIEW_LOOP_SECONDS) element.currentTime = 0;
+    });
+    playButton.addEventListener('click', function () { openPlayerFromPhotoView(name); });
     placeMainVideo();
     startMainVideo();
   }
@@ -4398,13 +4434,17 @@
     originalLink.href = folderURL + encodeURIComponent(name);
     originalLink.download = name;
     originalLink.textContent = 'Download original';
-    var opened = { view: view, name: name, element: element, root: root, controls: null, note: note,
-      originalLink: originalLink, autoplay: false, awaitingWebCopy: false, probing: false, idleAnswers: 0 };
+    var opened = { view: view, name: name, element: element, root: root, controls: null, playButton: null,
+      note: note, originalLink: originalLink, autoplay: false, failed: false,
+      awaitingWebCopy: false, probing: false, idleAnswers: 0 };
     mainVideo = opened;
     element.addEventListener('error', function () {
       // Only an error of the source this view gave it (stopMainVideo
-      // empties the element on the way out).
+      // empties the element on the way out). The player could not play
+      // it either: no play button.
       if (mainVideo === opened && element.getAttribute('src')) {
+        opened.failed = true;
+        if (opened.playButton) opened.playButton.hidden = true;
         showMainVideoNote('This video cannot be played in this browser. Download the original to watch it.');
       }
     });
@@ -4460,11 +4500,37 @@
     return loc ? Math.min(H, W * CANONICAL_H / loc.w) : H;
   }
 
-  // The close button: the photo view of the same video, in place of the
+  // The photo view's play button. The player is opened in the click's
+  // own task, so that it may start with sound (Safari lets a page start
+  // playing only there), and the URL changes by pushState, which fires no
+  // hashchange: a new history entry, whose state says it lies over the
+  // photo view of the same video, so Back returns there.
+  function openPlayerFromPhotoView(name) {
+    if (!playerCanOpen(name)) return;
+    // The photo view's entry gets the name it is waiting for first.
+    applyPendingHashUpdate();
+    try { history.pushState({ playerOverPhotoView: name }, '', playerHashFor(name)); } catch (_) {}
+    showPlayerView(photoIndexOfName(name), true);
+  }
+
+  // A video whose web copy is there and has not failed to play.
+  function playerCanOpen(name) {
+    if (!isVideoName(name) || !window.videos[name].web) return false;
+    return !(mainVideo && mainVideo.name === name && mainVideo.failed);
+  }
+
+  // The close button (and Escape). Over the photo view it came from, it
+  // is Back: photo view, player, close, Back must not open the player
+  // again. Opened by its link, the photo view of the same video takes the
   // player's history entry.
   function closePlayerView() {
     if (!playerViewShown()) return;
-    try { history.replaceState(null, '', '#' + encodeURIComponent(mainVideo.name)); } catch (_) {}
+    var name = mainVideo.name;
+    if (history.state && history.state.playerOverPhotoView === name) {
+      history.back();
+      return;
+    }
+    try { history.replaceState(null, '', '#' + encodeURIComponent(name)); } catch (_) {}
     refreshfromhash();
   }
 
@@ -4488,19 +4554,18 @@
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].parentNode !== thumbsEl) thumbsEl.appendChild(parts[i]);
     }
-    // As custom properties, so that the stylesheet's :fullscreen rule (the
-    // whole screen) wins over them while the player is fullscreen.
     var style = mainVideo.root.style;
-    style.setProperty('--player-left', g.dx + 'px');
-    style.setProperty('--player-top', g.dy + 'px');
-    style.setProperty('--player-width', g.dw + 'px');
-    style.setProperty('--player-height', g.dh + 'px');
+    style.left = g.dx + 'px';
+    style.top = g.dy + 'px';
+    style.width = g.dw + 'px';
+    style.height = g.dh + 'px';
     mainVideo.note.style.top = (g.dy + g.dh / 2) + 'px';
   }
 
   function setMainVideoSource(url) {
     var element = mainVideo.element;
     mainVideo.note.hidden = true;
+    if (mainVideo.playButton) mainVideo.playButton.hidden = false;
     element.src = url;
     // A browser that does not let a page start playing (no recent click,
     // or a policy) refuses play(), and the poster and the controls (or the

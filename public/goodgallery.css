@@ -198,34 +198,56 @@ html, body { overflow-x: hidden; }
 .zoom-control .zoom-label { min-width: 80px; text-align: center; color: var(--fg); }
 .zoom-control .zoom-back { padding: 4px 14px; }
 
-/* Photo view of a video (gallery.js openMainVideo): the player over
-   the main canvas, in the box a photo would fill (JS sets left, top, width,
-   height), a note over it while it cannot play, and a link to the original
-   in the top-right corner, styled like the page's other notices. */
-.main-player {
+/* Photo view of a video (gallery.js openVideoPreview): the silent
+   preview over the main canvas, in the box a photo would fill (JS sets
+   left, top, width, height), with a large play button in the middle; a
+   note over it while it cannot play, and a link to the original in the
+   top-right corner, styled like the page's other notices. Pointers go
+   through the box to the canvas, except on the button. */
+.main-preview {
   position: absolute;
-  left: var(--player-left);
-  top: var(--player-top);
-  width: var(--player-width);
-  height: var(--player-height);
   z-index: 2;
-  overflow: hidden;
-  background: transparent;
+  pointer-events: none;
 }
-.main-player:fullscreen {
-  left: 0;
-  top: 0;
-  width: 100%;
-  height: 100%;
-  background: #000;
-}
-.main-player.player-idle { cursor: none; }
+.main-video-preview,
 .main-video {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
+.main-video-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 72px;
+  min-width: 0;
+  height: 72px;
+  padding: 0;
+  border: 2px solid rgba(255,255,255,.85);
+  border-radius: 50%;
+  background: rgba(0,0,0,.55);
+  color: #fff;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+.main-video-play:hover { background: rgba(0,0,0,.75); color: #fff; }
+.main-video-play:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+.main-video-play svg { display: block; width: 40px; height: 40px; margin: 0 auto; fill: currentColor; }
+/* The player view's video and its controls (gallery.js
+   createVideoControls), filling the player view, or the screen. */
+.main-player {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  overflow: hidden;
+  background: #000;
+}
+.main-player.player-idle { cursor: none; }
 /* The storyboard frame shown over the picture while the seek bar is
    dragged: a canvas of the frame's own pixels, scaled to the picture. */
 .player-scrub-preview {
@@ -343,12 +365,6 @@ html, body { overflow-x: hidden; }
   background: #000;
 }
 .player-view:focus { outline: none; }
-.player-view .main-player {
-  left: 0;
-  top: 0;
-  width: 100%;
-  height: 100%;
-}
 .player-view .player-controls { padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px)); }
 .player-view .main-video-note { top: 50%; }
 .player-view .main-video-original {
