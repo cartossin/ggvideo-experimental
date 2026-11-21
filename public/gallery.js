@@ -451,25 +451,20 @@
     var target = e.target;
     var tn = target && target.tagName;
     var k = e.which || e.keyCode;
-    // Don't hijack typing in inputs / textareas / contenteditable. A range
-    // input (the player's volume) keeps its arrows, but Escape still leaves.
+    // Don't hijack typing in inputs / textareas / contenteditable.
     if (tn === 'TEXTAREA' || tn === 'SELECT' || (target && target.isContentEditable)) return;
-    if (tn === 'INPUT' && !(target.type === 'range' && k === 27)) return;
-    // A focused button (the player's) acts on Space and Enter itself.
+    var inRange = tn === 'INPUT' && target.type === 'range';
+    if (tn === 'INPUT' && !inRange) return;
+    // A focused button acts on Space and Enter itself.
     if (tn === 'BUTTON' && (k === 32 || k === 13)) return;
+    if (playerViewShown()) { onPlayerViewKey(e, k); return; }
+    // A range input keeps its arrows, but Escape still leaves.
+    if (inRange && k !== 27) return;
 
-    // Space plays or pauses the open video, wherever the focus is.
-    if (k === 32 && focusedIdx > 0 && toggleMainVideoPlayback()) {
+    // Space or Enter on the photo view of a video opens its player, as
+    // its play button does.
+    if ((k === 32 || k === 13) && focusedIdx > 0 && openPlayerOfChosenItem()) {
       e.preventDefault();
-      return;
-    }
-    // In fullscreen the browser's Escape ends the fullscreen and the
-    // arrows seek (as in the browser's own player); nothing else.
-    if (videoIsFullscreen()) {
-      if ((k === 37 || k === 39) && mainVideo) {
-        e.preventDefault();
-        mainVideo.controls.seekBy(k === 37 ? -SEEK_STEP_SECONDS : SEEK_STEP_SECONDS);
-      }
       return;
     }
 
@@ -498,6 +493,25 @@
       e.preventDefault();
       returnToGrid();
     }
+  }
+
+  // The player view's keys, wherever the focus is (but in a text input):
+  // the arrows seek (the volume slider keeps up and down), Space plays or
+  // pauses, f is fullscreen, m mutes, Escape closes the player. No key
+  // moves to another item. The seek bar handles its own keys first
+  // (createVideoControls). With a modifier the key is the browser's
+  // (Alt+Left is Back). In fullscreen the browser's Escape ends the
+  // fullscreen, and does not close the player.
+  function onPlayerViewKey(e, k) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    var controls = mainVideo.controls;
+    if (k === 37 || k === 39) controls.seekBy(k === 37 ? -SEEK_STEP_SECONDS : SEEK_STEP_SECONDS);
+    else if (k === 32) controls.togglePlayback();
+    else if (k === 70) controls.toggleFullscreen();   // f
+    else if (k === 77) controls.toggleMute();         // m
+    else if (k === 27 && !videoIsFullscreen()) closePlayerView();
+    else return;
+    e.preventDefault();
   }
 
   // ---------- view ----------
@@ -3900,7 +3914,9 @@
   }
 
   // The controls of `video` for the video named `name`. Returns
-  // { root, seekBy(seconds), destroy(), state() }.
+  // { root, seekBy(seconds), togglePlayback(), toggleMute(),
+  // toggleFullscreen(), destroy(), state() }; the toggles are the
+  // buttons', for the player view's keys.
   function createVideoControls(video, name) {
     var root = playerElement('div', 'main-player');
     root.appendChild(video);
@@ -4217,6 +4233,10 @@
         video.pause();
       }
     }
+    function toggleMute() {
+      video.muted = !video.muted;
+      if (!video.muted && video.volume === 0) video.volume = 1;
+    }
     function toggleFullscreen() {
       if (document.fullscreenElement || document.webkitFullscreenElement) {
         (document.exitFullscreen || document.webkitExitFullscreen).call(document);
@@ -4262,10 +4282,7 @@
     listen(seek, 'pointerenter', function (e) { if (storyboard) storyboard.prioritize(timeAtPointer(e.clientX)); });
     listen(seek, 'keydown', onSeekKey);
     listen(playButton, 'click', function () { togglePlayback(); wake(); });
-    listen(muteButton, 'click', function () {
-      video.muted = !video.muted;
-      if (!video.muted && video.volume === 0) video.volume = 1;
-    });
+    listen(muteButton, 'click', toggleMute);
     listen(volume, 'input', function () {
       video.volume = Number(volume.value);
       video.muted = video.volume === 0;
@@ -4287,6 +4304,9 @@
     return {
       root: root,
       seekBy: seekBy,
+      togglePlayback: function () { togglePlayback(); wake(); },
+      toggleMute: function () { toggleMute(); wake(); },
+      toggleFullscreen: toggleFullscreen,
       // Test hook: what the controls show.
       state: function () {
         return { previewShown: !preview.hidden, previewFrame: preview.hidden ? null : shownFrames.preview,
@@ -4513,6 +4533,16 @@
     showPlayerView(photoIndexOfName(name), true);
   }
 
+  // Space or Enter on the photo view: the item the visitor chose (the
+  // film strip may still be on its way to it). False when it is not a
+  // video the player can open.
+  function openPlayerOfChosenItem() {
+    var name = images[photoTheVisitorChose()];
+    if (!playerCanOpen(name)) return false;
+    openPlayerFromPhotoView(name);
+    return true;
+  }
+
   // A video whose web copy is there and has not failed to play.
   function playerCanOpen(name) {
     if (!isVideoName(name) || !window.videos[name].web) return false;
@@ -4573,19 +4603,6 @@
     if (!mainVideo.autoplay) return;
     var playing = element.play();
     if (playing && playing.catch) playing.catch(function () {});
-  }
-
-  // Space on the photo view of a playable video. False when there is none.
-  function toggleMainVideoPlayback() {
-    if (!mainVideo || !mainVideo.element.getAttribute('src')) return false;
-    var element = mainVideo.element;
-    if (element.paused) {
-      var playing = element.play();
-      if (playing && playing.catch) playing.catch(function () {});
-    } else {
-      element.pause();
-    }
-    return true;
   }
 
   function showMainVideoNote(text) {
