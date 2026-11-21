@@ -401,8 +401,9 @@
       return;
     }
     applyPendingHashUpdate();
-    // Mid-way through a film-strip move, reopen the photo it was heading for.
-    if (focusedIdx > 0 && images[photoTheVisitorChose()]) {
+    // Mid-way through a film-strip move, reopen the photo it was heading
+    // for. The player view's URL already names its video.
+    if (focusedIdx > 0 && !playerViewShown() && images[photoTheVisitorChose()]) {
       try { history.replaceState(null, '', '#' + encodeURIComponent(images[photoTheVisitorChose()])); } catch (_) {}
     }
     location.reload();
@@ -829,13 +830,15 @@
     },
     // The grid's video sheets: which play, which have a frame on the GPU.
     movingTiles: function () { return movingTiles.stats(); },
-    // The video open in the photo view, or null.
+    // The opened video (of the photo view or the player view), or null.
+    // view: 'photo' or 'player'; controls: null without our controls.
     mainVideo: function () {
       if (!mainVideo) return null;
       var element = mainVideo.element;
-      return { name: mainVideo.name, src: element.getAttribute('src'), currentTime: element.currentTime,
+      return { view: mainVideo.view, name: mainVideo.name, src: element.getAttribute('src'), currentTime: element.currentTime,
         paused: element.paused, muted: element.muted, poster: element.poster, nativeControls: element.controls,
-        controls: mainVideo.controls.state(), note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
+        controls: mainVideo.controls ? mainVideo.controls.state() : null,
+        note: mainVideo.note.hidden ? '' : mainVideo.note.textContent };
     },
     // Scroll mapping: layout height, spacer height, ratio, the layout y at
     // the viewport top and the photo whose row is there.
@@ -3877,6 +3880,7 @@
     muted: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zM16 9.4l1.4-1.4 2.1 2.1 2.1-2.1L23 9.4 20.9 11.5 23 13.6 21.6 15l-2.1-2.1-2.1 2.1L16 13.6l2.1-2.1z"/></svg>',
     fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z"/></svg>',
     exitFullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h2v6H4V8h4zM14 4h2v4h4v2h-6zM4 14h6v6H8v-4H4zM14 14h6v2h-4v4h-2z"/></svg>',
+    close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>',
   };
 
   function playerElement(tag, className, parent) {
@@ -4311,7 +4315,12 @@
   // Answers saying no video work is running before the page stops waiting
   // for a web copy (the work may not have started yet for the first ones).
   var WEB_COPY_IDLE_ANSWERS = 3;
-  var mainVideo = null;          // { name, element, note, originalLink, awaitingWebCopy, probing, idleAnswers }
+  // The opened video, of the photo view or of the player view (one at a
+  // time): { view: 'photo' or 'player', name, element, root, controls,
+  // note, originalLink, autoplay, awaitingWebCopy, probing, idleAnswers }.
+  // root holds the element (and the controls) and is what is removed on
+  // the way out.
+  var mainVideo = null;
   var mainVideoTimer = null;     // waits for the view to settle on a video
   var mainVideoTimerFor = null;  // the name it waits to open
 
@@ -4356,11 +4365,30 @@
   }
 
   function openMainVideo(name) {
-    var element = document.createElement('video');
-    element.className = 'main-video';
-    element.playsInline = true;
+    var element = createMainVideoElement('main-video');
     element.preload = 'auto';
-    element.poster = posterURLFor(name);
+    var g = mainImageGeom();
+    element.poster = posterURLFor(name, g ? g.dh * devicePixelRatio() : CANONICAL_H);
+    var controls = createVideoControls(element, name);
+    var opened = openedVideo('photo', name, element, controls.root);
+    opened.controls = controls;
+    // Sound is on unless the browser says otherwise; no autoplay for a
+    // visitor who asked for reduced motion.
+    opened.autoplay = !motionReduced();
+    placeMainVideo();
+    startMainVideo();
+  }
+
+  function createMainVideoElement(className) {
+    var element = document.createElement('video');
+    element.className = className;
+    element.playsInline = true;
+    return element;
+  }
+
+  // The parts every opened video has: the note over it while it cannot
+  // play, and the link to the original. Becomes mainVideo.
+  function openedVideo(view, name, element, root) {
     var note = document.createElement('div');
     note.className = 'main-video-note';
     note.setAttribute('role', 'status');
@@ -4370,9 +4398,8 @@
     originalLink.href = folderURL + encodeURIComponent(name);
     originalLink.download = name;
     originalLink.textContent = 'Download original';
-    var controls = createVideoControls(element, name);
-    var opened = { name: name, element: element, controls: controls, note: note, originalLink: originalLink,
-      awaitingWebCopy: false, probing: false, idleAnswers: 0 };
+    var opened = { view: view, name: name, element: element, root: root, controls: null, note: note,
+      originalLink: originalLink, autoplay: false, awaitingWebCopy: false, probing: false, idleAnswers: 0 };
     mainVideo = opened;
     element.addEventListener('error', function () {
       // Only an error of the source this view gave it (stopMainVideo
@@ -4384,17 +4411,68 @@
     // iOS plays fullscreen in its own player; the view is laid out again
     // when it closes, as it is after a page's fullscreen (startjs).
     element.addEventListener('webkitendfullscreen', scheduleRender);
-    placeMainVideo();
-    var web = window.videos[name].web;
-    if (web) setMainVideoSource(webCopyURL(web, window.videos[name].webVersion));
+    return opened;
+  }
+
+  // Its web copy, or the wait for it.
+  function startMainVideo() {
+    var info = window.videos[mainVideo.name];
+    if (info.web) setMainVideoSource(webCopyURL(info.web, info.webVersion));
     else awaitWebCopy();
   }
 
+  // The player view's video: the whole window, black around the picture,
+  // our controls, a button that closes it, the link to the original.
+  // A visitor who asked for the player hears it from the start; opened by
+  // a link alone, it starts by itself unless reduced motion is asked for.
+  function openPlayer(name, startedByVisitor) {
+    var element = createMainVideoElement('main-video');
+    element.preload = 'auto';
+    element.poster = posterURLFor(name, playerPictureHeight(name) * devicePixelRatio());
+    var controls = createVideoControls(element, name);
+    var view = playerElement('div', 'player-view');
+    view.tabIndex = -1;
+    view.appendChild(controls.root);
+    var closeButton = playerButton('player-close', view);
+    closeButton.innerHTML = PLAYER_ICONS.close;
+    closeButton.setAttribute('aria-label', 'Close player');
+    closeButton.addEventListener('click', closePlayerView);
+    var opened = openedVideo('player', name, element, view);
+    opened.controls = controls;
+    opened.autoplay = startedByVisitor || !motionReduced();
+    view.appendChild(opened.note);
+    view.appendChild(opened.originalLink);
+    $('thumbs').appendChild(view);
+    // The button or key that opened it has gone with the photo view.
+    view.focus({ preventScroll: true });
+    startMainVideo();
+  }
+
+  function playerViewShown() {
+    return !!mainVideo && mainVideo.view === 'player';
+  }
+
+  // The height in CSS px of the picture in the player view: the video's
+  // shape, contained in the window.
+  function playerPictureHeight(name) {
+    var loc = window.spriteMeta && spriteMeta.imageMap && spriteMeta.imageMap[name];
+    var W = window.innerWidth, H = window.innerHeight;
+    return loc ? Math.min(H, W * CANONICAL_H / loc.w) : H;
+  }
+
+  // The close button: the photo view of the same video, in place of the
+  // player's history entry.
+  function closePlayerView() {
+    if (!playerViewShown()) return;
+    try { history.replaceState(null, '', '#' + encodeURIComponent(mainVideo.name)); } catch (_) {}
+    refreshfromhash();
+  }
+
   // The poster as the photo view would fetch it: the per-photo tier for
-  // the box (already in the HTTP cache once the main canvas has it).
-  function posterURLFor(name) {
-    var g = mainImageGeom();
-    var tier = pickPerImageTier(g ? g.dh * devicePixelRatio() : CANONICAL_H);
+  // a picture deviceHeight device px tall (already in the HTTP cache once
+  // the main canvas has it).
+  function posterURLFor(name, deviceHeight) {
+    var tier = pickPerImageTier(deviceHeight);
     return folderURL + GG_DIR + '/' + encodeURIComponent(name) + '.h' + tier + '.avif' + tileQuery;
   }
 
@@ -4405,14 +4483,14 @@
   function placeMainVideo() {
     var thumbsEl = $('thumbs');
     var g = mainImageGeom();
-    if (!mainVideo || !thumbsEl || !g) return;
-    var parts = [mainVideo.controls.root, mainVideo.note, mainVideo.originalLink];
+    if (!mainVideo || mainVideo.view !== 'photo' || !thumbsEl || !g) return;
+    var parts = [mainVideo.root, mainVideo.note, mainVideo.originalLink];
     for (var i = 0; i < parts.length; i++) {
       if (parts[i].parentNode !== thumbsEl) thumbsEl.appendChild(parts[i]);
     }
     // As custom properties, so that the stylesheet's :fullscreen rule (the
     // whole screen) wins over them while the player is fullscreen.
-    var style = mainVideo.controls.root.style;
+    var style = mainVideo.root.style;
     style.setProperty('--player-left', g.dx + 'px');
     style.setProperty('--player-top', g.dy + 'px');
     style.setProperty('--player-width', g.dw + 'px');
@@ -4424,11 +4502,10 @@
     var element = mainVideo.element;
     mainVideo.note.hidden = true;
     element.src = url;
-    // Sound is on unless the browser says otherwise. A browser that does
-    // not let a page start playing (no recent click, or a policy) refuses
-    // play(), and the poster and controls wait for a click. No autoplay
-    // for a visitor who asked for reduced motion.
-    if (motionReduced()) return;
+    // A browser that does not let a page start playing (no recent click,
+    // or a policy) refuses play(), and the poster and the controls (or the
+    // play button) wait for a click.
+    if (!mainVideo.autoplay) return;
     var playing = element.play();
     if (playing && playing.catch) playing.catch(function () {});
   }
@@ -4500,9 +4577,15 @@
     closing.element.pause();
     closing.element.removeAttribute('src');
     closing.element.load();
-    closing.controls.destroy();
+    // The focus was in the player (its buttons, the seek bar): it goes
+    // back to the view, as on the page's start, not to nowhere.
+    var hadFocus = closing.root.contains(document.activeElement);
+    if (closing.controls) closing.controls.destroy();
+    closing.root.remove();
     closing.note.remove();
     closing.originalLink.remove();
+    var thumbsEl = $('thumbs');
+    if (hadFocus && thumbsEl) thumbsEl.focus({ preventScroll: true });
   }
 
   // A fullscreen video: the page must not lay the view out again, which
@@ -4632,6 +4715,8 @@
   function renderGallery() {
     var thumbsEl = $('thumbs');
     if (!thumbsEl) return;
+    // The player view fills the window by the stylesheet alone.
+    if (playerViewShown()) return;
     if (lastimagevalue < 1) {
       thumbsEl.innerHTML = '<div style="padding:24px;text-align:center;color:#888">' +
         (window.isadmin ? 'No images yet — upload some via the admin panel.' : 'No images.') +
@@ -4744,15 +4829,35 @@
   // The URL fragment as text. A fragment with a malformed escape ("#%")
   // cannot be decoded; it is treated as no fragment, so the grid still loads.
   function hashText() {
-    try { return decodeURIComponent(location.hash.slice(1) || ''); }
+    return decodedOrEmpty(location.hash.slice(1));
+  }
+  function decodedOrEmpty(text) {
+    try { return decodeURIComponent(text || ''); }
     catch (_) { return ''; }
   }
 
-  // The fragment names a zoom level (#fit, #size4), a photo (#name.jpg) or
-  // nothing. An empty or unknown fragment shows the grid at the default zoom.
-  // Zoom levels are checked first; photo names always carry an extension, so
-  // they cannot collide with them.
+  // The player view's link: #play=<encodeURIComponent(name)>. It is read
+  // from the fragment before decoding: encodeURIComponent never leaves a
+  // raw "=", so no item's own fragment can look like it.
+  var PLAYER_HASH_PREFIX = 'play=';
+  function playerHashFor(name) {
+    return '#' + PLAYER_HASH_PREFIX + encodeURIComponent(name);
+  }
+  // The name in a player link, or null when the fragment is not one.
+  function playerLinkName() {
+    var fragment = location.hash.slice(1);
+    if (fragment.indexOf(PLAYER_HASH_PREFIX) !== 0) return null;
+    return decodedOrEmpty(fragment.slice(PLAYER_HASH_PREFIX.length));
+  }
+
+  // The fragment names a zoom level (#fit, #size4), a photo (#name.jpg), a
+  // video's player (#play=name.mp4) or nothing. An empty or unknown
+  // fragment shows the grid at the default zoom. Zoom levels are checked
+  // first; photo names always carry an extension, so they cannot collide
+  // with them.
   function refreshfromhash() {
+    var playerName = playerLinkName();
+    if (playerName !== null) { showPlayerFromLink(playerName); return; }
     var raw = hashText();
     var levels = availableLevels();
     for (var li = 0; li < levels.length; li++) {
@@ -4784,7 +4889,7 @@
     focusedIdx = 0;
     setText('counter', '');
     document.body.classList.add('thumb-view');
-    document.body.classList.remove('image-view');
+    document.body.classList.remove('image-view', 'player-view');
     renderGallery();
     renderZoomControl();
     showAdminBar();
@@ -4797,9 +4902,41 @@
     movingTiles.pauseAll();
     focusedIdx = photoIdx;
     document.body.classList.add('image-view');
-    document.body.classList.remove('thumb-view');
+    document.body.classList.remove('thumb-view', 'player-view');
     renderGallery();
     renderZoomControl();
+    showAdminBar();
+  }
+
+  // A player link: a video opens in the player view; any other item the
+  // link names opens in the photo view (which puts its own name in the
+  // URL); a name not in the folder shows the grid, as for a photo.
+  function showPlayerFromLink(name) {
+    var itemIdx = photoIndexOfName(name);
+    if (itemIdx > 0 && isVideoName(name)) showPlayerView(itemIdx, false);
+    else if (itemIdx > 0) showPhotoView(itemIdx);
+    else showGridView(defaultLevelIdx());
+  }
+
+  // The player view takes the place of the photo view: focusedIdx still
+  // names the item (so no code of the grid view runs), but nothing of the
+  // photo view or the grid is left in #thumbs, and nothing is laid out
+  // there while it shows (renderGallery). startedByVisitor: opened by a
+  // click or key of the visitor, not by a link alone.
+  function showPlayerView(itemIdx, startedByVisitor) {
+    var name = images[itemIdx];
+    if (playerViewShown() && mainVideo.name === name) return;
+    teardownPhotoView();
+    stopMainVideo();
+    movingTiles.pauseAll();
+    focusedIdx = itemIdx;
+    commandedIdx = itemIdx;
+    document.body.classList.add('image-view', 'player-view');
+    document.body.classList.remove('thumb-view');
+    var thumbsEl = $('thumbs');
+    if (thumbsEl) thumbsEl.textContent = '';
+    canvasEl = null; spacerEl = null;
+    openPlayer(name, startedByVisitor);
     showAdminBar();
   }
 

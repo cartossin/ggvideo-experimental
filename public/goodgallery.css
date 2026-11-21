@@ -329,6 +329,41 @@ html, body { overflow-x: hidden; }
 }
 .main-video-original:hover { color: var(--accent); }
 
+/* The player view (gallery.js openPlayer): the video alone, filling the
+   window over everything else on the page, black around the picture, a
+   close button in the top-left corner and the link to the original in
+   the top-right one, clear of a phone's notch and home bar. */
+.player-view {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 40;
+  background: #000;
+}
+.player-view:focus { outline: none; }
+.player-view .main-player {
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+.player-view .player-controls { padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px)); }
+.player-view .main-video-note { top: 50%; }
+.player-view .main-video-original {
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  right: calc(8px + env(safe-area-inset-right, 0px));
+}
+.player-close {
+  position: absolute;
+  top: calc(4px + env(safe-area-inset-top, 0px));
+  left: calc(4px + env(safe-area-inset-left, 0px));
+  z-index: 3;
+  background: rgba(38,38,38,.85);
+}
+.player-close:focus-visible { outline: 2px solid #eee; outline-offset: 2px; }
+
 /* Hidden folders (admin view only — see server.js sethidden endpoint). The
    little (hidden) tag and dimmed cell make them obvious without changing the
    click target's position. */
