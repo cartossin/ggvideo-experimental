@@ -344,7 +344,9 @@ browsers need to play and seek video.
   as soon as they leave the screen or the grid. Only as a degraded case,
   when the tiles on screen are spread over more than 4 sheets of the
   right tier, a smaller tier plays. A sheet off screen pauses at once and
-  is freed after 15 s. Posters stay where nothing plays: tiles under a
+  is freed after 15 s. Opening the player view frees every sheet at once:
+  a paused sheet still being fetched keeps downloading, and on a slow
+  link that takes the film's bandwidth and holds up its seeks. Posters stay where nothing plays: tiles under a
   quarter of the smallest tier, a hidden page, the photo view, a video not
   ready yet, and anything that could not be loaded or decoded. The tiles
   move with `prefers-reduced-motion` too (it is often on for the system's

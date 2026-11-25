@@ -2538,6 +2538,7 @@
   //                                frames there are, decide what plays
   //   movingTiles.onScroll()       the viewport moved within the buffer
   //   movingTiles.pauseAll()       the grid is not showing (photo view)
+  //   movingTiles.releaseAll()     the player view: every sheet freed
   //   movingTiles.forgetTextures() a new or restored GL context
   //   movingTiles.stats()          test hook
   var movingTiles = (function () {
@@ -2915,6 +2916,12 @@
       releaseOldestPausedBeyondLimit();
     }
 
+    // Every player freed at once (the player view: nothing of the grid or
+    // the strip shows, and the film needs the link and the decoder).
+    function releaseAll() {
+      Array.from(players.values()).forEach(releasePlayer);
+    }
+
     function releaseOldestPausedBeyondLimit() {
       if (players.size <= MAX_LIVE_SHEETS) return;
       var paused = Array.from(players.values()).filter(function (p) { return !p.wanted; })
@@ -3112,7 +3119,7 @@
     }
 
     return { afterGridDraw: afterGridDraw, onScroll: onScroll, pauseAll: pauseAll,
-      forgetTextures: forgetTextures, stats: stats };
+      releaseAll: releaseAll, forgetTextures: forgetTextures, stats: stats };
   })();
 
   // ---- focus mode: main image + filmstrip ------------------------------
@@ -5010,7 +5017,9 @@
     if (playerViewShown() && mainVideo.name === name) return;
     teardownPhotoView();
     stopMainVideo();
-    movingTiles.pauseAll();
+    // Not paused but freed: a paused mosaic keeps downloading, and on a
+    // slow link that takes the film's bandwidth (its seeks wait for it).
+    movingTiles.releaseAll();
     focusedIdx = itemIdx;
     commandedIdx = itemIdx;
     document.body.classList.add('image-view', 'player-view');
