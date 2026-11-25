@@ -381,7 +381,10 @@ browsers need to play and seek video.
   bar shows the time there and, when the video has a storyboard (frames
   sampled over the whole video in sprite sheets), that frame; dragging
   shows the frame over the picture at once, until the video has decoded
-  the real one, and seeks while dragging, one seek at a time (`fastSeek`
+  the real one (not when the real picture on screen is within half a
+  second of the position, or nearer it than the storyboard's frame: in a
+  slow, fine drag the video's own frames follow the pointer with nothing
+  flashed over them), and seeks while dragging, one seek at a time (`fastSeek`
   where the browser has it), then exactly where released. The controls
   fade after 2.5 s without the pointer while playing. In the photo
   view the arrows move between items as for photos, and Space or Enter

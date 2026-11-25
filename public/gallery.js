@@ -3980,7 +3980,7 @@
       var inSheet = index - k * perSheet;
       var rows = Math.ceil(Math.min(perSheet, info.count - k * perSheet) / info.columns);
       var scaleX = sheet.bitmap.width / (info.columns * info.width), scaleY = sheet.bitmap.height / (rows * info.height);
-      return { bitmap: sheet.bitmap, index: index,
+      return { bitmap: sheet.bitmap, index: index, seconds: index * info.interval,
         sx: (inSheet % info.columns) * info.width * scaleX, sy: Math.floor(inSheet / info.columns) * info.height * scaleY,
         sw: info.width * scaleX, sh: info.height * scaleY, aspect: info.width / info.height };
     }
@@ -4126,6 +4126,7 @@
     var storyboard = createStoryboardLoader(name);
     var pointerFrame = null;   // { clientX, pointerType } waiting for the next animation frame
     var pointerFrameRequest = null;
+    var pictureSeconds = 0;   // the time of the picture the video shows (realPictureIsBetter)
     var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
       issued: null, issuedExact: false, taken: false };
     var shownFrames = { hover: null, preview: null };   // storyboard frame indexes painted last (test hook)
@@ -4306,10 +4307,15 @@
     }
 
     // The storyboard frame over the whole picture while dragging, in the
-    // box the video's picture fills inside the player.
+    // box the video's picture fills inside the player. Only when it is the
+    // better picture of the position: see realPictureIsBetter.
     function showScrubPreview(seconds) {
       var frame = storyboard && storyboard.frameAt(seconds);
-      if (!frame) { preview.hidden = true; return; }
+      if (!frame || realPictureIsBetter(frame, seconds)) {
+        if (frame) trace('kept', seconds, pictureSeconds);
+        preview.hidden = true;
+        return;
+      }
       var boxW = root.clientWidth, boxH = root.clientHeight;
       var width = Math.min(boxW, boxH * frame.aspect), height = width / frame.aspect;
       preview.style.left = ((boxW - width) / 2) + 'px';
@@ -4320,6 +4326,24 @@
       preview.hidden = false;
       shownFrames.preview = frame.index;
       trace('preview', seconds, frame.index);
+    }
+
+    // The picture the video shows now (pictureSeconds: where it last
+    // arrived or played to; during a seek it still shows that one) against
+    // a storyboard frame, for a position being dragged to. The storyboard
+    // has one small frame every few seconds. In a slow, fine drag the video
+    // keeps up, a frame or two behind the pointer: its own picture is close
+    // and sharp, and a storyboard frame put over it between two real
+    // frames is a flash of a blurred picture, or of another moment (even
+    // another shot) of the video. So the storyboard frame is shown only
+    // where the real picture is not close to the position and the
+    // storyboard's is closer.
+    function realPictureIsBetter(frame, seconds) {
+      var realDistance = Math.abs(pictureSeconds - seconds);
+      return realDistance <= PREVIEW_CLOSE_ENOUGH_SECONDS || realDistance <= Math.abs(frame.seconds - seconds);
+    }
+    function notePictureTime() {
+      if (!video.seeking) pictureSeconds = video.currentTime;
     }
 
     // Test hook: with window.__playerTrace an array, every pointer move and
@@ -4436,13 +4460,13 @@
     listen(video, 'click', onPictureClick);
     listen(video, 'play', showPlaying);
     listen(video, 'pause', showPlaying);
-    listen(video, 'timeupdate', function () { showPosition(); showBuffered(); });
+    listen(video, 'timeupdate', function () { notePictureTime(); showPosition(); showBuffered(); });
     listen(video, 'suspend', showBuffered);
     listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
     listen(video, 'progress', showBuffered);
     listen(video, 'volumechange', showVolume);
     listen(video, 'seeking', function () { scrub.taken = true; });
-    listen(video, 'seeked', function () { onSeeked(); showBuffered(); });
+    listen(video, 'seeked', function () { notePictureTime(); onSeeked(); showBuffered(); });
     ['loadedmetadata', 'loadeddata', 'canplay', 'playing'].forEach(function (type) { listen(video, type, seekAgainIfDropped); });
     listen(seek, 'pointerdown', onSeekPointerDown);
     listen(seek, 'pointermove', onSeekPointerMove);
