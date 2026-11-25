@@ -383,9 +383,12 @@ browsers need to play and seek video.
   shows the frame over the picture at once, until the video has decoded
   the real one, and seeks while dragging, one seek at a time (`fastSeek`
   where the browser has it), then exactly where released. The controls
-  fade after 2.5 s without the pointer while playing. Space plays and
-  pauses; the arrows move between items as for photos, and seek 5 s on a
-  focused seek bar and in full screen; Escape returns to the grid. Without
+  fade after 2.5 s without the pointer while playing. In the photo
+  view the arrows move between items as for photos, and Space or Enter
+  open the player as the play button does. In the player view the arrows
+  seek 5 s, Space plays and pauses, `f` is full screen, `m` mutes, and
+  Escape or Enter go back to the photo view (Enter opens and closes, so
+  one hand can go through a folder's videos). Without
   a web copy yet, the poster and a note stay until the build-status poll
   finds it. Leaving stops playback.
 

@@ -497,8 +497,10 @@
 
   // The player view's keys, wherever the focus is (but in a text input):
   // the arrows seek (the volume slider keeps up and down), Space plays or
-  // pauses, f is fullscreen, m mutes, Escape closes the player. No key
-  // moves to another item. The seek bar handles its own keys first
+  // pauses, f is fullscreen, m mutes, Escape closes the player. So does
+  // Enter, the key that opened it, so one hand can go through a folder's
+  // videos (not while the key repeats, which would open and close in
+  // turn; a focused link keeps its Enter). No key moves to another item. The seek bar handles its own keys first
   // (createVideoControls). With a modifier the key is the browser's
   // (Alt+Left is Back). In fullscreen the browser's Escape ends the
   // fullscreen, and does not close the player.
@@ -510,6 +512,7 @@
     else if (k === 70) controls.toggleFullscreen();   // f
     else if (k === 77) controls.toggleMute();         // m
     else if (k === 27 && !videoIsFullscreen()) closePlayerView();
+    else if (k === 13 && !videoIsFullscreen() && !e.repeat && e.target.tagName !== 'A') closePlayerView();
     else return;
     e.preventDefault();
   }
