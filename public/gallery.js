@@ -2540,6 +2540,9 @@
   //   movingTiles.pauseAll()       the grid is not showing (photo view)
   //   movingTiles.releaseAll()     the player view: every sheet freed
   //   movingTiles.forgetTextures() a new or restored GL context
+  //   movingTiles.showStrip(), .stripFrameOf(), .leaveStrip()
+  //                                the photo view's film strip (see "the
+  //                                film strip" below)
   //   movingTiles.stats()          test hook
   var movingTiles = (function () {
     // A tier is drawn at no less than 1/MAX_MINIFICATION of its size: a
@@ -2874,17 +2877,104 @@
     function updatePlayers(onScreen, dpr) {
       if (!motionAllowed()) { pauseAll(); return; }
       var counts = tilesOnScreenBySheet(onScreen, dpr);
-      var wanted = Array.from(counts.keys()).filter(function (key) { return !failedSheets.has(key); })
+      var wanted = sheetsWithMostTiles(counts).concat(webCopiesToPlay(onScreen));
+      playExactly(wanted, function (key) { return sheetsInBuffer.get(key); });
+    }
+
+    // The sheets that may play, from sheet key -> tiles in view: the ones
+    // with the most tiles, at most MAX_PLAYING_SHEETS, none that failed.
+    function sheetsWithMostTiles(counts) {
+      return Array.from(counts.keys()).filter(function (key) { return !failedSheets.has(key); })
         .sort(function (a, b) { return counts.get(b) - counts.get(a); })
         .slice(0, MAX_PLAYING_SHEETS);
-      wanted = wanted.concat(webCopiesToPlay(onScreen));
+    }
+
+    // These sheets play and every other player stops. Shared by the grid and
+    // the film strip, which never show at once, so the caps hold for both.
+    // entryOf(key) describes a sheet that has no player yet (createPlayer).
+    function playExactly(wanted, entryOf) {
       var wantedSet = new Set(wanted);
       players.forEach(function (player, key) { if (!wantedSet.has(key)) stopPlayer(player); });
       wanted.forEach(function (key) {
-        var player = players.get(key) || createPlayer(key, sheetsInBuffer.get(key));
+        var player = players.get(key) || createPlayer(key, entryOf(key));
         playPlayer(player);
       });
       releaseOldestPausedBeyondLimit();
+    }
+
+    // ---- the film strip ----
+    // The photo view's strip is a 2D canvas of small tiles (FILM_TILE_H CSS
+    // px) painted from the still atlas. Its video tiles in view play from
+    // the same sheets and through the same players as the grid's, so the
+    // same rules hold: one tier for all of them, the smallest at least as
+    // tall as a strip tile in device px (chooseTier), a video without a
+    // tile there drawn from its tallest one (mosaicSourceOf), at most
+    // MAX_PLAYING_SHEETS playing, a sheet out of view paused and freed
+    // after RELEASE_AFTER_MS. The strip uploads no texture: a video tile is
+    // drawn straight from its sheet's <video>, cut by the tile's rectangle,
+    // over its poster. A new frame of a playing sheet asks the strip for
+    // one paint (scheduleFilmstripFramePaint, one per animation frame for
+    // all sheets), so while no video tile in view plays nothing repaints.
+    // A strip tile taller than every tier stays a poster: unlike the grid,
+    // the strip plays no web copies (a whole video decoded for a tile a few
+    // dozen pixels tall, beside the preview of the opened one).
+    //
+    //   movingTiles.showStrip(tiles)  every full strip draw: what is in view
+    //   movingTiles.stripFrameOf(name) what a strip tile is painted from
+    //   movingTiles.leaveStrip()      the photo view goes (teardownPhotoView)
+    var stripShown = false;
+    var stripTier = null;
+    var stripSources = new Map();   // video name -> { key, rect }, the strip tiles in view
+
+    // Whether the strip's sheets may play: it is showing (the player view
+    // covers it) and so is the page. As for the grid, not gated on
+    // prefers-reduced-motion (see motionAllowed).
+    function stripMotionAllowed() {
+      return focusedIdx > 0 && !!filmstripEl && !playerViewShown() && document.visibilityState !== 'hidden';
+    }
+
+    // tiles: the strip's tiles in view, [{ name, w, h }] in CSS px.
+    function showStrip(tiles) {
+      if (!atlas) return;
+      if (!stripMotionAllowed()) { leaveStrip(); return; }
+      stripShown = true;
+      var dpr = devicePixelRatio();
+      var onScreen = tiles.filter(function (t) { return isVideoName(t.name); })
+        .map(function (t) { return { t: t, atlasIndex: atlasIndexByName.get(t.name) }; });
+      stripTier = onScreen.length ? chooseTier(onScreen, dpr).chosen : null;
+      stripSources = new Map();
+      var tilesBySheet = new Map();
+      var sheetByKey = new Map();
+      onScreen.forEach(function (item) {
+        var source = mosaicSourceOf(item.t, item.atlasIndex, stripTier, dpr);
+        if (!source) return;
+        var key = sheetKey(source.tierHeight, source.rect[0]);
+        stripSources.set(item.t.name, { key: key, rect: source.rect });
+        tilesBySheet.set(key, (tilesBySheet.get(key) || 0) + 1);
+        sheetByKey.set(key, { sheet: source.sheet });
+      });
+      playExactly(sheetsWithMostTiles(tilesBySheet), function (key) { return sheetByKey.get(key); });
+    }
+
+    // What a strip tile's moving picture is drawn from: its sheet's video,
+    // once that has a frame, and the tile's rectangle in it
+    // ([sheetIndex, x, y, width, height]). null: the poster stays. A sheet
+    // paused but not yet freed still has its last frame, drawn too, so a
+    // tile never steps back to its poster and forward again.
+    function stripFrameOf(name) {
+      var source = stripShown ? stripSources.get(name) : null;
+      var player = source ? players.get(source.key) : null;
+      // HAVE_CURRENT_DATA: there is a frame to draw.
+      if (!player || player.video.readyState < 2) return null;
+      return { video: player.video, rect: source.rect, key: source.key };
+    }
+
+    function leaveStrip() {
+      if (!stripShown) return;
+      stripShown = false;
+      stripTier = null;
+      stripSources = new Map();
+      pauseAll();
     }
 
     // The web copies to play: tiles on screen that play theirs, nearest the
@@ -2996,6 +3086,7 @@
       gridRenderer.deleteTexture(textureKeyOf(player.key));
       players.delete(player.key);
       if (player.hasFrame && canvasEl) scheduleGridRedraw();
+      if (stripShown) scheduleFilmstripFramePaint();   // its tiles: posters again
       player.hasFrame = false;
     }
 
@@ -3050,6 +3141,12 @@
 
     function showCurrentFrame(player) {
       var video = player.video;
+      if (stripShown) {
+        // The strip draws from the element itself: no upload, one paint.
+        player.lastUploadedTime = video.currentTime;
+        scheduleFilmstripFramePaint();
+        return;
+      }
       // HAVE_CURRENT_DATA: there is a frame to upload.
       if (video.readyState < 2 || !canvasEl || !sheetsInBuffer.has(player.key)) return;
       var started = performance.now();
@@ -3073,10 +3170,12 @@
       players.forEach(function (player) { player.hasFrame = false; player.lastUploadedTime = -1; });
     }
 
-    // Page visibility changed: the next full draw decides again.
+    // Page visibility changed: the next full draw (of the grid or the
+    // strip) decides again.
     function onVisibilityChanged() {
-      if (!motionAllowed()) pauseAll();
+      if (!motionAllowed() && !stripMotionAllowed()) pauseAll();
       if (canvasEl) scheduleGridRedraw();
+      if (filmstripEl) scheduleFilmstripRedraw();
     }
     if (active) document.addEventListener('visibilitychange', onVisibilityChanged);
 
@@ -3107,10 +3206,17 @@
       var list = [];
       var textureBytes = 0;
       players.forEach(function (player, key) {
-        list.push({ key: key, playing: player.wanted, hasFrame: player.hasFrame, time: player.video.currentTime });
+        list.push({ key: key, playing: player.wanted, paused: player.video.paused, hasFrame: player.hasFrame,
+          time: player.video.currentTime });
         if (player.hasFrame) textureBytes += player.video.videoWidth * player.video.videoHeight * 4;
       });
+      // The strip: its tier, and each tile in view drawn from a frame now.
+      var stripDrawn = [];
+      stripSources.forEach(function (source, name) {
+        if (stripFrameOf(name)) stripDrawn.push({ name: name, source: source.key });
+      });
       return { players: list, failed: Array.from(failedSheets), sheetsInBuffer: Array.from(sheetsInBuffer.keys()),
+        strip: { shown: stripShown, tier: stripTier, drawn: stripDrawn },
         drawn: drawnTilesOnScreen(),
         idealTier: idealTier, chosenTier: chosenTier, upscaleTolerance: UPSCALE_TOLERANCE,
         maxPlayingWebCopies: MAX_PLAYING_WEB_COPIES,
@@ -3119,16 +3225,19 @@
     }
 
     return { afterGridDraw: afterGridDraw, onScroll: onScroll, pauseAll: pauseAll,
-      releaseAll: releaseAll, forgetTextures: forgetTextures, stats: stats };
+      releaseAll: releaseAll, forgetTextures: forgetTextures, showStrip: showStrip, stripFrameOf: stripFrameOf, leaveStrip: leaveStrip,
+      stats: stats };
   })();
 
   // ---- focus mode: main image + filmstrip ------------------------------
   // Layout: #thumbs (overflow:hidden, full viewport) holds #focus-main on top
   // and #focus-strip (the only scroll surface) below. Filmstrip tiles are
-  // drawn from the h50 atlas at natural aspect; the centered tile drives
+  // drawn from the h50 atlas at natural aspect, a video's moving picture
+  // over its poster (movingTiles, "the film strip"); the centered tile drives
   // the main canvas, which is repainted from h50 first, then upgraded to the
   // best available per-image LoD asynchronously.
   var FILM_TILE_H = 30;
+  var FILM_ATLAS_H = 50;  // the still atlas the strip's tiles are painted from
   var FILM_H = FILM_TILE_H + 8;
   var FILM_GAP = 3;
   var mainEl = null;      // main image canvas
@@ -3145,6 +3254,7 @@
   var filmPadL    = 0;    // pads so the first/last tile can sit at center
   var filmPadR    = 0;
   var filmRedrawRaf = null;       // scheduled filmstrip + main image redraw
+  var filmFramePaintRaf = null;   // scheduled strip paint for new video frames
   var mainImageDecayRaf = null;   // momentum after a swipe on the main image
   var focusInProgrammaticScroll = false;
 
@@ -3249,6 +3359,11 @@
     focusInProgrammaticScroll = false;
     if (filmRedrawRaf) cancelAnimationFrame(filmRedrawRaf);
     filmRedrawRaf = null;
+    if (filmFramePaintRaf) cancelAnimationFrame(filmFramePaintRaf);
+    filmFramePaintRaf = null;
+    // The strip's sheets pause (and are freed later) whatever view comes
+    // next; a rebuilt strip plays them again at once.
+    movingTiles.leaveStrip();
     if (mainImageDecayRaf) cancelAnimationFrame(mainImageDecayRaf);
     mainImageDecayRaf = null;
     if (pendingHashTimer) clearTimeout(pendingHashTimer);
@@ -3381,7 +3496,29 @@
     return lo;
   }
 
+  // A full draw of the strip, after a scroll, a sprite's arrival or a
+  // rebuild: which sprites and moving sheets it needs, which tile is the
+  // focus, then the paint.
   function drawFilmstrip() {
+    if (!filmstripEl || !filmCanvasEl || !filmTilePos || !window.spriteMeta) return;
+    var W = layoutWidth();
+    var atlasH = FILM_ATLAS_H;
+    var atlas = spriteMeta.atlases && spriteMeta.atlases[String(atlasH)];
+    if (atlas && filmTilePos.length > 0) {
+      var scrollLeft = filmstripEl.scrollLeft;
+      var leftEdge = scrollLeft - filmPadL;
+      var rightEdge = leftEdge + W;
+      ensureFilmstripSprites(atlasH, atlas, leftEdge, rightEdge);
+      settleFocusFromFilmstripScroll(scrollLeft, W);
+      movingTiles.showStrip(filmstripTilesInView(leftEdge, rightEdge));
+    }
+    paintFilmstrip();
+  }
+
+  // Paints the strip as it is: the background, then each tile in view. Also
+  // run alone for each new video frame (scheduleFilmstripFramePaint), which
+  // changes no scroll position, focus or sprite.
+  function paintFilmstrip() {
     if (!filmstripEl || !filmCanvasEl || !filmTilePos || !window.spriteMeta) return;
     var W = layoutWidth();
     var dpr = devicePixelRatio();
@@ -3389,17 +3526,30 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#0a0a0a';
     ctx.fillRect(0, 0, W, FILM_H);
-
-    var atlasH = 50;
-    var atlas = spriteMeta.atlases && spriteMeta.atlases[String(atlasH)];
+    var atlas = spriteMeta.atlases && spriteMeta.atlases[String(FILM_ATLAS_H)];
     if (!atlas || filmTilePos.length === 0) return;
-    var scrollLeft = filmstripEl.scrollLeft;
-    var leftEdge = scrollLeft - filmPadL;
-    var rightEdge = leftEdge + W;
+    var leftEdge = filmstripEl.scrollLeft - filmPadL;
+    paintFilmstripTiles(ctx, FILM_ATLAS_H, atlas, leftEdge, leftEdge + W);
+  }
 
-    ensureFilmstripSprites(atlasH, atlas, leftEdge, rightEdge);
-    settleFocusFromFilmstripScroll(scrollLeft, W);
-    paintFilmstripTiles(ctx, atlasH, atlas, leftEdge, rightEdge);
+  // A sheet playing in the strip has a new frame: one paint on the next
+  // animation frame, for every sheet's frames that arrive before it. None
+  // when a full redraw is already coming, which paints too.
+  function scheduleFilmstripFramePaint() {
+    if (filmFramePaintRaf || filmRedrawRaf || !filmCanvasEl) return;
+    filmFramePaintRaf = requestAnimationFrame(function () {
+      filmFramePaintRaf = null;
+      paintFilmstrip();
+    });
+  }
+
+  // The tiles in view, as the moving tiles want them: [{ name, w, h }].
+  function filmstripTilesInView(leftEdge, rightEdge) {
+    var tiles = [];
+    for (var i = filmTileIndexAtX(leftEdge); i < filmTilePos.length && filmTilePos[i] <= rightEdge; i++) {
+      tiles.push({ name: images[i + 1], w: filmTileW[i], h: FILM_TILE_H });
+    }
+    return tiles;
   }
 
   // Load only the sprites covering the visible tiles (plus a one-sprite
@@ -3456,19 +3606,29 @@
       var tx = filmTilePos[ti];
       var tw = filmTileW[ti];
       if (tx > rightEdge) break;
-      var bm = bitmaps[Math.floor(ti / atlas.cellsPerSprite)];
-      if (!bm) continue;
-      var loc = spriteMeta.imageMap[images[ti + 1]];
-      if (!loc) continue;
-      var cell = atlasCellRect(loc, atlas);
       var screenX = tx - leftEdge;
-      ctx.drawImage(bm, cell.sx, cell.sy, cell.sw, cell.sh, screenX, yPad, tw, FILM_TILE_H);
+      var posterDrawn = paintFilmstripPoster(ctx, bitmaps, atlas, ti, screenX, yPad, tw);
+      // The moving picture over the poster, once its sheet has a frame.
+      var frame = movingTiles.stripFrameOf(images[ti + 1]);
+      if (frame) ctx.drawImage(frame.video, frame.rect[1], frame.rect[2], frame.rect[3], frame.rect[4], screenX, yPad, tw, FILM_TILE_H);
+      if (!posterDrawn && !frame) continue;
       if (ti + 1 === focusedIdx) {
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 1.5;
         ctx.strokeRect(screenX + 0.5, yPad + 0.5, tw - 1, FILM_TILE_H - 1);
       }
     }
+  }
+
+  // A strip tile's still (a video's poster) from its atlas sprite; false
+  // while that sprite is not loaded.
+  function paintFilmstripPoster(ctx, bitmaps, atlas, ti, screenX, yPad, tw) {
+    var bm = bitmaps[Math.floor(ti / atlas.cellsPerSprite)];
+    var loc = spriteMeta.imageMap[images[ti + 1]];
+    if (!bm || !loc) return false;
+    var cell = atlasCellRect(loc, atlas);
+    ctx.drawImage(bm, cell.sx, cell.sy, cell.sw, cell.sh, screenX, yPad, tw, FILM_TILE_H);
+    return true;
   }
 
   // Where + how big to draw the main image.

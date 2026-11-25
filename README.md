@@ -355,6 +355,23 @@ browsers need to play and seek video.
   a touch screen: after a tap on the tab), every video tile at least 60
   px high and 40 wide shows a small badge with a play triangle and its
   duration; otherwise there is no badge at all.
+- **Film strip.** In the photo view the strip's video tiles move too,
+  from the same sheets, played by the same players under the same rules:
+  one tier for the strip, the smallest at least as tall as its tiles in
+  device pixels (h50 at 1x, h100 at 2x), scaled down; a video with no
+  tile there plays the tallest tier it has; only sheets with a tile in
+  view play, at most 4, the ones with the most tiles. The strip is a 2D
+  canvas, so no texture is made: each new frame repaints the strip once,
+  drawing every video tile in view straight from its sheet's `<video>`
+  over its poster. When no video tile in view plays, nothing repaints.
+  Posters stay where nothing plays: a video the atlas lacks, a folder
+  whose atlas is not built yet, a sheet not loaded yet. The strip plays
+  no web copies, so a strip tile taller than every tier stays a poster.
+  The tiles move with `prefers-reduced-motion` too, as in the grid. Its sheets
+  pause as soon as the photo view goes and are freed 15 s later, as in
+  the grid, or at once by the player view (which covers the strip). The cost follows the
+  tiles in view, not the folder: in a folder of 10,000 videos a strip
+  of about 30 video tiles plays one h50 sheet.
 - **Opening a video** shows the web copy over the poster, in the box a
   photo would fill, with the viewer's own controls (no browser controls):
   play/pause, a seek bar with the buffered ranges, time and duration,
