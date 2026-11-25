@@ -4682,6 +4682,9 @@
   function openPlayer(name, startedByVisitor) {
     var element = createMainVideoElement('main-video');
     element.preload = 'auto';
+    // An animated GIF plays round and round, as the GIF itself does in a
+    // browser; a video plays once.
+    element.loop = isVideoName(name) && !!window.videos[name].loops;
     element.poster = posterURLFor(name, playerPictureHeight(name) * devicePixelRatio());
     var controls = createVideoControls(element, name);
     var view = playerElement('div', 'player-view');
