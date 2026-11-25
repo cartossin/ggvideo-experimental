@@ -12,7 +12,8 @@ to photos. A video shows in the grid as a still (its poster frame, built
 exactly like a photo), then as a moving preview: all of a folder's previews
 are packed into a few mosaic videos per size, which the viewer plays once
 and cuts into tiles, the way the still grid uses sprite atlases. Opening a
-video plays a browser-friendly copy (H.264 + AAC). See [Video](#video).
+video plays a browser-friendly copy (H.264 + AAC). An animated GIF is a
+video too, one that loops. See [Video](#video).
 
 ## Goodgallery
 
@@ -172,7 +173,10 @@ open it.
 Supported source formats: JPEG, PNG, GIF, WebP, AVIF, and video files with
 the extensions mp4, m4v, mov, mkv, webm, avi, wmv, flv, mpg, mpeg, ts,
 m2ts, mts, 3gp, ogv, asf, divx and vob, in whatever codec ffmpeg decodes
-(ffprobe decides; see [Video](#video)). A photo libvips cannot
+(ffprobe decides; see [Video](#video)). A GIF of more than one frame is
+also a video (see [Animated GIFs](#animated-gifs)); animated WebP, PNG
+(APNG) and AVIF are not: they are photos, shown by their first frame.
+A photo libvips cannot
 read, one above the pixel limit (`MAX_SOURCE_MEGAPIXELS`), or one whose
 conversion failed gets a red placeholder tile instead of breaking the
 gallery, and the admin page names it and says why. Rescanning the folder
@@ -189,7 +193,9 @@ listed, uploaded (the chunked uploader takes files up to `MAX_UPLOAD_BYTES`,
 64 GiB by default; finishing an upload needs room for the file twice while
 its chunks are joined), moved to the trash, restored and rescanned the same
 way. The extension says a file is a video; ffprobe then decides whether it
-has a video stream ffmpeg can decode.
+has a video stream ffmpeg can decode. A GIF is a photo by its extension
+and a video as well when it has more than one frame; see
+[Animated GIFs](#animated-gifs).
 
 What the server makes for each video, in this order:
 
@@ -312,10 +318,11 @@ up to 6 hours, 8 times;
 one that failed because of the file waits for a rescan or a new file.
 
 What the page gets: the manifest (`gg/_manifest.json`) has
-`videos: { "<name>": { duration, web, hasAudio, width, height, storyboard } }`
-for every video ffmpeg can read (`web` is the web copy's file name in
-`gg/`, or null until it is made; `width` and `height` are the displayed
-size; `storyboard` is described below, or null) and
+`videos: { "<name>": { duration, web, hasAudio, width, height, loops, storyboard } }`
+for every video ffmpeg can read, animated GIFs included (`web` is the web
+copy's file name in `gg/`, or null until it is made; `width` and `height`
+are the displayed size; `loops` is true for an animated GIF; `storyboard`
+is described below, or null) and
 `videoAtlasDir` (`video_<id>`, or null while there is no atlas). The folder
 page sets `videos` and `videoAtlas` (the `_video.json` contents plus `dir`)
 next to `spriteMeta`. The build-status poll (`?build-status`) keeps its
@@ -326,6 +333,56 @@ atlas is ready, and how many web copies of how many videos are done.
 Static files, the web copies, mosaics and originals included, answer HTTP
 range requests (`Range: bytes=...`, 206 and 416, `If-Range`), which
 browsers need to play and seek video.
+
+### Animated GIFs
+
+A GIF is listed, uploaded, trashed and served like a photo, and its still
+renditions are made from its first frame by libvips, as before. A GIF of
+more than one frame is also a video: when its folder is built, ffprobe
+(with the GIF reader only, so a file named `.gif` that is something else
+is not read as a video) gives its size and the delay of every frame, and
+the folder's video record (`_videos.json`) keeps the answer. From then on
+it gets everything a video gets, steps 2 to 4 above: preview clips, a
+moving tile in the grid and the film strip, the silent preview in the
+photo view, and a web copy for the player. "Download original" is the
+GIF. A GIF of one frame stays a photo only, exactly as before.
+
+- **Timing.** Frames last as long as browsers play them: a delay of 0 or
+  1 hundredths of a second plays as 10, as in every browser (ffmpeg's own
+  GIF reader makes 0 into 10 but plays 1 as 1, so the server sets the
+  timing itself). The manifest's `duration`, the clips and the web copy
+  follow it.
+- **Looping.** A GIF's preview clip is the GIF looped: the fewest whole
+  seconds that hold whole loops of it, so its tile repeats seamlessly (a
+  0.2 s GIF: 1 s, five times round; 1.3 s: 13 s; 4 s: 4 s), or the first
+  `VIDEO_PREVIEW_SECONDS` when that is longer (a 75 s GIF, or one of
+  2.71 s, which needs 271 s). The manifest says `loops: true`, and the
+  player view plays it round and round; videos play once.
+- **No sound.** A GIF's web copy has none; the player treats it as any
+  video without sound.
+- **Transparency.** Transparent pixels are black in the clips and the web
+  copy, as they are in the stills (libvips reads them as 0, 0, 0, which is
+  what the atlas and the photo view show).
+- **Limits.** A GIF is shown as a photo only, with a line in the log, when
+  its picture is larger than 4096x4096 (each frame is decoded whole; ffmpeg
+  itself refuses one above 2^31 pixels) or it has more than 50,000 frames
+  (the probe reads at most that many frame headers, so a GIF of millions of
+  frames costs no more). A truncated GIF is a video of the frames that
+  decode. Encoding is bounded by `FFMPEG_TIMEOUT_SECONDS`, as for videos.
+- **Replaced by another GIF** under the same name: the new one is probed
+  like a new file. An animated GIF that is now a single frame loses its
+  clips, web copy and tile (the atlas showing it is withdrawn at once);
+  a still that is now animated gets them.
+- **Folders built before this version** have no record of their GIFs, so
+  the next check of such a folder (at startup, a visit, an upload or a
+  rescan) builds it: its GIFs are probed, nothing else is made again (the
+  photos' renditions, the still atlas and the other videos' clips and web
+  copies are current), and the video work makes the animated GIFs' clips
+  and web copies and adds their tiles to the atlas (one sheet per tier
+  re-encoded, as for any added video).
+
+Only GIF is covered: animated WebP, APNG and AVIF image sequences are
+photos, shown by their first frame.
 
 ### In the browser
 
@@ -393,7 +450,8 @@ browsers need to play and seek video.
   Escape or Enter go back to the photo view (Enter opens and closes, so
   one hand can go through a folder's videos). Without
   a web copy yet, the poster and a note stay until the build-status poll
-  finds it. Leaving stops playback.
+  finds it. Leaving stops playback. An animated GIF loops in the player
+  (manifest `loops`); a video stops at its end.
 
 ### Cost
 
@@ -459,8 +517,8 @@ exactly as an uninterrupted build does.
 
 - No security review. ffmpeg parses every video, uploaded ones included,
   with the local-file protocol only and only real video container demuxers
-  allowed (no playlists, concat or image sequences), but its decoders are
-  still a large attack surface.
+  allowed (no playlists, concat or image sequences; GIFs with the GIF
+  demuxer only), but its decoders are still a large attack surface.
 - HDR is tone-mapped with a fixed curve (hable); Dolby Vision profiles
   without an HDR10 base layer are not handled specially.
 - Subtitles, chapters, extra audio tracks and metadata are not carried
@@ -597,7 +655,8 @@ is refused as ambiguous).
   (probe, poster, preview clips, web copy, the `_videos.json` record);
   `lib/video_atlas.js` lays out and encodes the mosaics and documents
   `_video.json`, composing them in `lib/mosaic_worker.js` and
-  `lib/mosaic_lane_worker.js` (worker threads); `lib/video_stage.js` runs the video work of each folder
+  `lib/mosaic_lane_worker.js` (worker threads); `lib/videos.js` also
+  decides which GIFs are videos (`isVideoItem`); `lib/video_stage.js` runs the video work of each folder
   after its stills are committed.
 - `lib/auth.js`, `lib/webauthn.js` and `lib/admin_api.js` handle the passkey
   admin; `lib/upload.js` the chunked uploader; `lib/trash.js` the trash;
