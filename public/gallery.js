@@ -3844,22 +3844,27 @@
 
   // ---- storyboards ------------------------------------------------------
   // Frames sampled over a whole video, packed in sprite sheets, for the
-  // seek bar's previews (the contract is at the top of lib/storyboard.js).
-  // window.videos[name].storyboard is null (none yet, or a video under
-  // 30 s) or { interval, count, width, height, columns, rows, sheets }:
-  // frame i shows time i * interval, in sheets[floor(i / (columns * rows))]
-  // at column i % columns and row floor(i / columns) % rows, width x height;
-  // the last sheet has only the rows its frames need.
+  // seek bar's previews and stops (the contract is at the top of
+  // lib/storyboard.js). window.videos[name].storyboard is null (none yet,
+  // or a video under 30 s) or { interval, count, width, height, columns,
+  // rows, sheets, times }: frame i is in sheets[floor(i / (columns * rows))]
+  // at column i % columns and row floor(i / columns) % rows, width x
+  // height (the last sheet has only the rows its frames need), and shows
+  // the web copy's picture at the time the file `times` gives for it, a
+  // keyframe of every video over a minute.
   function storyboardOf(name) {
     var info = isVideoName(name) && window.videos[name].storyboard;
     var usable = info && info.interval > 0 && info.count > 0 && info.width > 0 && info.height > 0 &&
-      info.columns > 0 && info.rows > 0 && info.sheets && info.sheets.length;
+      info.columns > 0 && info.rows > 0 && info.sheets && info.sheets.length && info.times;
     return usable ? info : null;
   }
 
+  function storyboardFileURL(info, file) {
+    return folderURL + GG_DIR + '/' + encodeURIComponent(file) + (info.version ? '?v=' + encodeURIComponent(info.version) : '');
+  }
   function storyboardSheetURL(info, sheetIndex) {
     var sheet = info.sheets[sheetIndex];
-    return sheet ? folderURL + GG_DIR + '/' + encodeURIComponent(sheet) + (info.version ? '?v=' + encodeURIComponent(info.version) : '') : null;
+    return sheet ? storyboardFileURL(info, sheet) : null;
   }
 
   // ---- a storyboard ready for scrubbing ----
@@ -3882,8 +3887,40 @@
   var STORYBOARD_MAX_RESIDENT_SHEETS = 40;
   var STORYBOARD_PARALLEL_FETCHES = 2;
 
+  // ---- the stops of the seek bar ----
+  // The storyboard's frame times are where a drag or a click on the seek
+  // bar may land: what is shown while dragging is then exactly the
+  // picture playback starts from on release, and for a video over a minute
+  // that picture is a keyframe, which a seek decodes alone. They are a
+  // small file fetched as the player opens (before the video's first
+  // data: a drag can come at once); until it has come, or when it cannot
+  // be had, the bar is free, as for a video without a storyboard.
+  function fetchStoryboardTimes(info, signal) {
+    return fetch(storyboardFileURL(info, info.times), { credentials: 'same-origin', signal: signal })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (body) {
+        var times = body && body.times;
+        if (!Array.isArray(times) || times.length !== info.count) throw new Error('storyboard times do not match its frames');
+        return times;
+      });
+  }
+  // The index of the time in `times` (increasing) nearest `seconds`.
+  function nearestTimeIndex(times, seconds) {
+    var low = 0, high = times.length - 1;
+    while (low < high) {
+      var middle = (low + high) >> 1;
+      if (times[middle] < seconds) low = middle + 1; else high = middle;
+    }
+    // times[low] is the first at or after seconds; the one before may be nearer.
+    return low > 0 && seconds - times[low - 1] <= times[low] - seconds ? low - 1 : low;
+  }
+
   // The storyboard of `name`, or null when it has none. Returns
-  // { start(seconds), prioritize(seconds), frameAt(seconds), state(), destroy() }.
+  // { start(seconds), prioritize(seconds), stopAt(seconds), frameAt(index),
+  // frameIndexAt(seconds), state(), destroy() }.
   function createStoryboardLoader(name) {
     var info = storyboardOf(name);
     if (!info) return null;
@@ -3897,8 +3934,23 @@
     var inFlight = 0;
     var started = false, closed = false;
     var timing = { openedAt: performance.now(), startedAt: 0, allReadyAt: 0 };
+    var times = null;         // the frames' times, once fetched
+    var timesController = new AbortController();
+    fetchStoryboardTimes(info, timesController.signal).then(function (fetched) { if (!closed) times = fetched; }, function () {});
 
-    function frameIndexAt(seconds) { return Math.min(info.count - 1, Math.max(0, Math.round(seconds / info.interval))); }
+    // The frame for `seconds`: the nearest stop once the times have come,
+    // about where it is until then (for the order of the sheets only).
+    function frameIndexAt(seconds) {
+      if (times) return nearestTimeIndex(times, seconds);
+      return Math.min(info.count - 1, Math.max(0, Math.round(seconds / info.interval)));
+    }
+    // The stop nearest `seconds`, { index, seconds }, or null while the
+    // times are not known.
+    function stopAt(seconds) {
+      if (!times) return null;
+      var index = nearestTimeIndex(times, seconds);
+      return { index: index, seconds: times[index] };
+    }
     function sheetOfFrame(index) { return Math.floor(index / perSheet); }
     function readySheet(k) { var sheet = sheets.get(k); return sheet && sheet.bitmap ? sheet : null; }
 
@@ -3980,27 +4032,20 @@
       var inSheet = index - k * perSheet;
       var rows = Math.ceil(Math.min(perSheet, info.count - k * perSheet) / info.columns);
       var scaleX = sheet.bitmap.width / (info.columns * info.width), scaleY = sheet.bitmap.height / (rows * info.height);
-      return { bitmap: sheet.bitmap, index: index, seconds: index * info.interval,
+      return { bitmap: sheet.bitmap, index: index,
         sx: (inSheet % info.columns) * info.width * scaleX, sy: Math.floor(inSheet / info.columns) * info.height * scaleY,
         sw: info.width * scaleX, sh: info.height * scaleY, aspect: info.width / info.height };
     }
-    // The frame nearest `seconds` among the decoded ones: its own if its
-    // sheet is ready, else the nearest frame of the nearest ready sheet
-    // (better than nothing while that sheet is still on its way); null
-    // when none is ready yet.
-    function frameAt(seconds) {
-      var index = frameIndexAt(seconds);
+    // Frame `index`, or null while its sheet is not ready (another frame
+    // would show a picture the bar does not land on).
+    function frameAt(index) {
       var k = sheetOfFrame(index);
-      if (readySheet(k)) return frameIn(readySheet(k), k, index);
-      for (var d = 1; d < sheetCount; d++) {
-        if (readySheet(k - d)) return frameIn(readySheet(k - d), k - d, (k - d + 1) * perSheet - 1);
-        if (readySheet(k + d)) return frameIn(readySheet(k + d), k + d, (k + d) * perSheet);
-      }
-      return null;
+      return readySheet(k) ? frameIn(readySheet(k), k, index) : null;
     }
 
     function destroy() {
       closed = true;
+      timesController.abort();
       queue = [];
       sheets.forEach(function (sheet) {
         if (sheet.controller) sheet.controller.abort();
@@ -4009,11 +4054,11 @@
       sheets.clear();
     }
     function state() {
-      return { sheets: sheetCount, ready: countReady(), scale: scale,
+      return { sheets: sheetCount, ready: countReady(), scale: scale, stops: times ? times.length : 0,
         msToAllReady: timing.allReadyAt ? timing.allReadyAt - timing.startedAt : null,
         msFromOpeningToAllReady: timing.allReadyAt ? timing.allReadyAt - timing.openedAt : null };
     }
-    return { start: start, prioritize: prioritize, frameAt: frameAt, frameIndexAt: frameIndexAt, state: state, destroy: destroy };
+    return { start: start, prioritize: prioritize, stopAt: stopAt, frameAt: frameAt, frameIndexAt: frameIndexAt, state: state, destroy: destroy };
   }
 
   // Draws `frame` (frameAt) into `canvas`, whose pixels are the frame's:
@@ -4045,21 +4090,38 @@
   //
   // The seek bar is a WAI-ARIA slider (a <div role="slider">, not an
   // <input type="range">, whose track cannot show buffered ranges or a
-  // preview without per-browser pseudo-element styling). Hovering it shows
-  // the storyboard frame and the time above the pointer. Dragging shows the
-  // storyboard frame at once over the whole picture, scaled up, until the
-  // video has decoded the real frame there: that is what makes seeking feel
-  // instant before the decoder catches up. While dragging, the video seeks
-  // continuously but one seek at a time: a new seek is issued only once
-  // the previous one has finished ('seeked'), to the latest position, with
-  // fastSeek() where it exists (Safari, Firefox: the nearest keyframe,
-  // fast), currentTime elsewhere; on release, an exact seek to the
-  // position. Issuing a seek per pointer move instead makes each one cancel
-  // the last, and the picture never catches up until the drag stops.
+  // preview without per-browser pseudo-element styling).
+  //
+  // With a storyboard, the pointer on the bar lands on the nearest of its
+  // frames' times (its stops, see fetchStoryboardTimes): hovering shows
+  // that frame and its time above the stop; dragging moves the playhead
+  // from stop to stop and shows the stop's frame at once over the whole
+  // picture, scaled up, until the video has decoded the same picture
+  // itself; releasing (or clicking) plays from exactly that picture. That
+  // is what makes seeking feel instant before the decoder catches up, and
+  // the picture seen is the picture played. Without a storyboard (a video
+  // under 30 s, or its times not come yet) the bar is free and the video's
+  // own frames follow it. The arrow keys seek by time, not by stop.
+  //
+  // While dragging, the video seeks continuously but one seek at a time: a
+  // new seek is issued only once the previous one has finished ('seeked'),
+  // to the latest position. Issuing a seek per pointer move instead makes
+  // each one cancel the last, and the picture never catches up until the
+  // drag stops. A seek to a stop of a video over a minute decodes one
+  // keyframe, so the video keeps up with all but a fast drag.
   var CONTROLS_IDLE_MS = 2500;      // controls fade after this long without a pointer or key while playing
   var SEEK_STEP_SECONDS = 5;        // arrow keys on the seek bar, and in fullscreen
-  var PREVIEW_CLOSE_ENOUGH_SECONDS = 0.5;
-  var END_OF_VIDEO_SECONDS = 0.25;         // a drag released this near the end leaves the video there  // a decoded frame this near the drag position replaces the preview
+  var END_OF_VIDEO_SECONDS = 0.25;  // a drag released this near the end leaves the video there
+  var LANDED_PICTURE_WAIT_MS = 200; // the longest wait to play after a drag (playOnceShown)
+  var FREE_POSITION_FRAME_SECONDS = 0.25;  // a frame this long or shorter holds a free position (isPictureOfTarget)
+  // Every seek goes this far past the time asked for. A stop's time is
+  // rounded to the microsecond, so it can be a hair before its frame's
+  // own timestamp, and a seek there would land on the frame before (as it
+  // would in a browser that cuts a time in seconds down to whole
+  // microseconds). A millisecond is far less than a frame. (Chrome 156
+  // landed on the right frame without it for 240 stops of 23.976 and 30
+  // fps copies, none of whose times was rounded down.)
+  var SEEK_PAST_SECONDS = 0.001;
 
   var PLAYER_ICONS = {
     play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
@@ -4121,14 +4183,16 @@
 
     // target: the position wanted last; seekWanted: a seek to it waits for
     // the one in flight; seekPending: the video has not got there yet.
-    // issued/issuedExact: the last seek given to the video, and whether exact;
-    // taken: the video began it ('seeking' came).
+    // issued: the last seek given to the video; taken: the video began it
+    // ('seeking' came); playOnArrival: play once the seek pending lands;
+    // waits: counts the waits for a landed picture (playOnceShown), so an
+    // older one's callback does nothing; shownSeconds: the time of the
+    // picture presented after the last seek landed (notePresentedPicture).
     var storyboard = createStoryboardLoader(name);
     var pointerFrame = null;   // { clientX, pointerType } waiting for the next animation frame
     var pointerFrameRequest = null;
-    var pictureSeconds = 0;   // the time of the picture the video shows (realPictureIsBetter)
     var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
-      issued: null, issuedExact: false, taken: false };
+      issued: null, taken: false, playOnArrival: false, waits: 0, shownSeconds: null };
     var shownFrames = { hover: null, preview: null };   // storyboard frame indexes painted last (test hook)
     var idleTimer = null;
     var lastPointerType = 'mouse';
@@ -4217,18 +4281,16 @@
 
     // ---- seeking ----
     // One seek at a time, to the latest wanted position (see above).
-    // A position already sought exactly (in flight, or arrived and not
-    // played on from) is not sought again: a click's press and release
-    // both ask for the same position, and on a file with keyframes far
-    // apart a second seek doubles the wait. After a drag that used
-    // fastSeek (the nearest keyframe), the exact seek on release is kept.
+    // A position already sought (in flight, or arrived and not played on
+    // from) is not sought again: a click's press and release both ask for
+    // the same position, and on a file with keyframes far apart a second
+    // seek doubles the wait.
     function alreadySought() {
-      return scrub.issuedExact && scrub.issued === scrub.target &&
+      return scrub.issued === scrub.target &&
         (video.seeking || Math.abs(video.currentTime - scrub.target) < 0.05);
     }
     function issueSeek() {
-      var exact = !(scrub.active && typeof video.fastSeek === 'function');
-      if (exact && alreadySought()) {
+      if (alreadySought()) {
         scrub.seekWanted = false;
         // No seek, so no 'seeked' will come to take the preview away: the
         // video already shows this position (a pointer move that does not
@@ -4241,10 +4303,8 @@
       if (video.seeking) { scrub.seekWanted = true; return; }
       scrub.seekWanted = false;
       scrub.issued = scrub.target;
-      scrub.issuedExact = exact;
       scrub.taken = false;
-      if (exact) video.currentTime = scrub.target;
-      else video.fastSeek(scrub.target);
+      video.currentTime = scrub.target + SEEK_PAST_SECONDS;
     }
     // A video with nothing to seek in yet drops a seek without 'seeking'
     // or 'seeked' (the seeking steps of HTML end there; Safari on an
@@ -4261,13 +4321,13 @@
     function onSeeked() {
       if (scrub.seekWanted) { issueSeek(); return; }
       scrub.seekPending = false;
-      // The decoded frame is for the latest position (near enough after a
-      // fastSeek while dragging): it replaces the preview. A seek to an
-      // older position never does: it was followed by another (seekWanted).
-      if (!scrub.active || Math.abs(video.currentTime - scrub.target) <= PREVIEW_CLOSE_ENOUGH_SECONDS) {
-        if (!preview.hidden) trace('real', scrub.target, video.currentTime);
-        preview.hidden = true;
-      }
+      // The decoded frame is for the latest position, the picture the
+      // preview showed: it replaces the preview. A seek to an older
+      // position never does: it was followed by another (seekWanted).
+      if (!preview.hidden) trace('real', scrub.target, video.currentTime);
+      preview.hidden = true;
+      notePresentedPicture();
+      if (scrub.playOnArrival) playOnceShown();
       showPosition();
     }
     function seekTo(seconds) {
@@ -4287,32 +4347,40 @@
       var rect = seek.getBoundingClientRect();
       return rect.width ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) * duration() : 0;
     }
+    // Where the pointer on the bar lands: { seconds, frame } with frame the
+    // storyboard frame's index at a stop, or null (a free bar).
+    function landingAt(clientX) {
+      var seconds = timeAtPointer(clientX);
+      var stop = storyboard && storyboard.stopAt(seconds);
+      return stop ? { seconds: stop.seconds, frame: stop.index } : { seconds: seconds, frame: null };
+    }
+    function storyboardFrame(landing) {
+      return landing.frame === null ? null : storyboard.frameAt(landing.frame);
+    }
 
-    // The frame and time above the pointer on the seek bar.
-    function showHover(seconds, clientX) {
-      var rect = seek.getBoundingClientRect();
-      var frame = storyboard && storyboard.frameAt(seconds);
+    // The frame and time of the landing above it on the seek bar.
+    function showHover(landing) {
+      var frame = storyboardFrame(landing);
       hoverFrame.hidden = !frame;
       if (frame) {
         hoverFrame.style.width = '160px';
         hoverFrame.style.height = Math.round(160 / frame.aspect) + 'px';
         paintStoryboardFrame(hoverFrame, frame);
         shownFrames.hover = frame.index;
-        trace('hover', seconds, frame.index);
+        trace('hover', landing.seconds, frame.index);
       }
-      hoverTime.textContent = formatTime(seconds);
+      hoverTime.textContent = formatTime(landing.seconds);
       hover.hidden = false;
-      var half = hover.offsetWidth / 2;
-      hover.style.left = Math.min(rect.width - half, Math.max(half, clientX - rect.left)) + 'px';
+      var width = seek.getBoundingClientRect().width, half = hover.offsetWidth / 2;
+      hover.style.left = Math.min(width - half, Math.max(half, fraction(landing.seconds) * width)) + 'px';
     }
 
     // The storyboard frame over the whole picture while dragging, in the
-    // box the video's picture fills inside the player. Only when it is the
-    // better picture of the position: see realPictureIsBetter.
-    function showScrubPreview(seconds) {
-      var frame = storyboard && storyboard.frameAt(seconds);
-      if (!frame || realPictureIsBetter(frame, seconds)) {
-        if (frame) trace('kept', seconds, pictureSeconds);
+    // box the video's picture fills inside the player, until the video
+    // shows the same picture (onSeeked; at once if it already does).
+    function showScrubPreview(landing) {
+      var frame = storyboardFrame(landing);
+      if (!frame) {
         preview.hidden = true;
         return;
       }
@@ -4325,29 +4393,12 @@
       paintStoryboardFrame(preview, frame);
       preview.hidden = false;
       shownFrames.preview = frame.index;
-      trace('preview', seconds, frame.index);
+      trace('preview', landing.seconds, frame.index);
     }
 
-    // The picture the video shows now (pictureSeconds: where it last
-    // arrived or played to; during a seek it still shows that one) against
-    // a storyboard frame, for a position being dragged to. The storyboard
-    // has one small frame every few seconds. In a slow, fine drag the video
-    // keeps up, a frame or two behind the pointer: its own picture is close
-    // and sharp, and a storyboard frame put over it between two real
-    // frames is a flash of a blurred picture, or of another moment (even
-    // another shot) of the video. So the storyboard frame is shown only
-    // where the real picture is not close to the position and the
-    // storyboard's is closer.
-    function realPictureIsBetter(frame, seconds) {
-      var realDistance = Math.abs(pictureSeconds - seconds);
-      return realDistance <= PREVIEW_CLOSE_ENOUGH_SECONDS || realDistance <= Math.abs(frame.seconds - seconds);
-    }
-    function notePictureTime() {
-      if (!video.seeking) pictureSeconds = video.currentTime;
-    }
-
-    // Test hook: with window.__playerTrace an array, every pointer move and
-    // every painted storyboard frame is logged (time, position, frame).
+    // Test hook: with window.__playerTrace an array, every pointer move,
+    // every painted storyboard frame and what resumed playing after a drag
+    // (play-shown, play-waited) are logged (time, position, frame).
     function trace(kind, seconds, frameIndex) {
       if (!Array.isArray(window.__playerTrace)) return;
       window.__playerTrace.push({ kind: kind, at: performance.now(), seconds: seconds,
@@ -4360,16 +4411,18 @@
       lastPointerType = e.pointerType;
       seek.setPointerCapture(e.pointerId);
       scrub.active = true;
-      scrub.wasPlaying = !video.paused;
+      scrub.wasPlaying = !video.paused || scrub.playOnArrival;
+      scrub.playOnArrival = false;
+      scrub.waits++;
       video.pause();
       wake();
       if (storyboard) storyboard.prioritize(timeAtPointer(e.clientX));
-      scrubTo(timeAtPointer(e.clientX), e.clientX);
+      scrubTo(landingAt(e.clientX));
     }
-    function scrubTo(seconds, clientX) {
-      scrub.target = seconds;
-      showScrubPreview(seconds);
-      showHover(seconds, clientX);
+    function scrubTo(landing) {
+      scrub.target = landing.seconds;
+      showScrubPreview(landing);
+      showHover(landing);
       issueSeek();
       showPosition();
     }
@@ -4387,25 +4440,72 @@
       var move = pointerFrame;
       pointerFrame = null;
       if (!move) return;
-      var seconds = timeAtPointer(move.clientX);
-      if (storyboard) storyboard.prioritize(seconds);
-      if (scrub.active) scrubTo(seconds, move.clientX);
-      else if (move.pointerType === 'mouse') showHover(seconds, move.clientX);
+      if (storyboard) storyboard.prioritize(timeAtPointer(move.clientX));
+      var landing = landingAt(move.clientX);
+      if (scrub.active) scrubTo(landing);
+      else if (move.pointerType === 'mouse') showHover(landing);
     }
     function onSeekPointerUp(e) {
       if (!scrub.active) return;
       if (pointerFrameRequest !== null) { cancelAnimationFrame(pointerFrameRequest); pointerFrameRequest = null; pointerFrame = null; }
       scrub.active = false;
-      scrub.target = timeAtPointer(e.clientX);
+      scrub.target = landingAt(e.clientX).seconds;
       if (e.pointerType !== 'mouse') hover.hidden = true;
-      issueSeek();   // not active any more: an exact seek
+      issueSeek();
       // Playing again after the drag, unless it was released at the very
       // end: play() on an ended video starts it again from the beginning.
-      if (scrub.wasPlaying && scrub.target < duration() - END_OF_VIDEO_SECONDS) {
-        var playing = video.play();
-        if (playing && playing.catch) playing.catch(function () {});
-      }
+      scrub.playOnArrival = scrub.wasPlaying && scrub.target < duration() - END_OF_VIDEO_SECONDS;
+      if (!scrub.seekPending && landedPictureIsShown()) playAfterDrag();
+      else if (!scrub.seekPending) playOnceShown();   // landed, not drawn yet (a quick click)
       showPosition();
+    }
+    // Playing after a drag waits until the picture of the released
+    // position is on screen, so playback goes on from it. Told to play
+    // while seeking, or as the seek landed ('seeked' comes before the
+    // picture is drawn), Chrome went on from the next frame, the released
+    // one never presented (check_viewer_stops.py, requestVideoFrameCallback's
+    // presentedFrames). So after 'seeked' it waits until a presented
+    // frame is the released position's (the picture of an earlier seek of
+    // the drag can be presented after it, and was taken for it), or
+    // LANDED_PICTURE_WAIT_MS where a browser drew it before 'seeked' (no
+    // frame then comes while paused) or has no requestVideoFrameCallback.
+    function playOnceShown() {
+      var wait = ++scrub.waits;
+      function stillWaiting() { return wait === scrub.waits; }
+      function onFrame(now, metadata) {
+        if (!stillWaiting()) return;
+        if (!isPictureOfTarget(metadata.mediaTime)) { video.requestVideoFrameCallback(onFrame); return; }
+        if (scrub.playOnArrival) trace('play-shown', scrub.target, metadata.mediaTime);
+        playAfterDrag();
+      }
+      if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(onFrame);
+      setTimeout(function () {
+        if (!stillWaiting()) return;
+        if (scrub.playOnArrival) trace('play-waited', scrub.target, null);
+        playAfterDrag();
+      }, LANDED_PICTURE_WAIT_MS);
+    }
+    // The picture a landed seek shows, once presented: a release just after
+    // 'seeked' (a quick click) must still wait for it, a release long after
+    // need not.
+    function notePresentedPicture() {
+      scrub.shownSeconds = null;
+      if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(function (now, metadata) { scrub.shownSeconds = metadata.mediaTime; });
+    }
+    function landedPictureIsShown() {
+      return !('requestVideoFrameCallback' in video) || (scrub.shownSeconds !== null && isPictureOfTarget(scrub.shownSeconds));
+    }
+    // A frame starting at `mediaTime` is the picture of the position
+    // sought: a stop's own frame starts at its time; a free position's
+    // frame began up to a frame before it.
+    function isPictureOfTarget(mediaTime) {
+      return mediaTime <= scrub.target + 2 * SEEK_PAST_SECONDS && mediaTime > scrub.target - FREE_POSITION_FRAME_SECONDS;
+    }
+    function playAfterDrag() {
+      if (!scrub.playOnArrival) return;
+      scrub.playOnArrival = false;
+      var playing = video.play();
+      if (playing && playing.catch) playing.catch(function () {});
     }
     function onSeekKey(e) {
       var step = { 37: -SEEK_STEP_SECONDS, 39: SEEK_STEP_SECONDS, 33: duration() / 10, 34: -duration() / 10 }[e.keyCode];
@@ -4460,13 +4560,13 @@
     listen(video, 'click', onPictureClick);
     listen(video, 'play', showPlaying);
     listen(video, 'pause', showPlaying);
-    listen(video, 'timeupdate', function () { notePictureTime(); showPosition(); showBuffered(); });
+    listen(video, 'timeupdate', function () { showPosition(); showBuffered(); });
     listen(video, 'suspend', showBuffered);
     listen(video, 'durationchange', function () { showPosition(); showBuffered(); });
     listen(video, 'progress', showBuffered);
     listen(video, 'volumechange', showVolume);
     listen(video, 'seeking', function () { scrub.taken = true; });
-    listen(video, 'seeked', function () { notePictureTime(); onSeeked(); showBuffered(); });
+    listen(video, 'seeked', function () { onSeeked(); showBuffered(); });
     ['loadedmetadata', 'loadeddata', 'canplay', 'playing'].forEach(function (type) { listen(video, type, seekAgainIfDropped); });
     listen(seek, 'pointerdown', onSeekPointerDown);
     listen(seek, 'pointermove', onSeekPointerMove);
@@ -4510,6 +4610,7 @@
           bufferedRanges: buffered.children.length, valueNow: seek.getAttribute('aria-valuenow') };
       },
       destroy: function () {
+        scrub.playOnArrival = false;
         if (idleTimer) clearTimeout(idleTimer);
         if (pointerFrameRequest !== null) cancelAnimationFrame(pointerFrameRequest);
         if (storyboard) storyboard.destroy();

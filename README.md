@@ -439,15 +439,16 @@ photos, shown by their first frame.
   play/pause, a seek bar with the buffered ranges, time and duration,
   mute and volume, full screen, and a "Download original" link. It plays
   with sound if the browser lets the page start it (otherwise it waits for
-  a click), not by itself under `prefers-reduced-motion`. Hovering the seek
-  bar shows the time there and, when the video has a storyboard (frames
-  sampled over the whole video in sprite sheets), that frame; dragging
-  shows the frame over the picture at once, until the video has decoded
-  the real one (not when the real picture on screen is within half a
-  second of the position, or nearer it than the storyboard's frame: in a
-  slow, fine drag the video's own frames follow the pointer with nothing
-  flashed over them), and seeks while dragging, one seek at a time (`fastSeek`
-  where the browser has it), then exactly where released. The controls
+  a click), not by itself under `prefers-reduced-motion`. When the video
+  has a storyboard (frames sampled over the whole video in sprite sheets,
+  keyframes of the web copy for videos over a minute), the seek bar stops
+  only on its frames' times: hovering shows the nearest frame and its
+  time, dragging moves from frame to frame and shows each over the
+  picture at once, until the video has decoded the same picture (it
+  seeks while dragging, one seek at a time), and releasing or clicking
+  plays from exactly the frame shown. Without one (videos under 30 s) the
+  bar is free and the video's own frames follow it. The arrows seek by
+  time, not by frame. The controls
   fade after 2.5 s without the pointer while playing. In the photo
   view the arrows move between items as for photos, and Space or Enter
   open the player as the play button does. In the player view the arrows
