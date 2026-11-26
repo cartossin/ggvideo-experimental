@@ -272,7 +272,26 @@ What the server makes for each video, in this order:
    whole (their copy may keep keyframes far apart), and their frames are
    the first at or after each second. Videos under 30 s get none.
 
-Steps 2 to 4 run after the folder's build is committed, in a queue of
+5. **First-frame still.** `gg/<name>.first.avif`: the web copy's first
+   picture, at the web copy's size, listed in the manifest as
+   `firstFrame: { file, version }` (null until made; the contract is at
+   the top of `lib/first_frame.js`). The photo view paints it under the
+   video and the element shows it as its poster, in the photo view and the
+   player, so the only picture seen before the video plays is the one it
+   starts from. (The poster is a later frame chosen to stand for the video
+   in the grid; shown large, it gave away a moment of the video before it
+   played. The grid keeps it.) One ffmpeg per video: the first picture is
+   decoded and encoded by libaom as an AVIF still (CRF 18, one thread),
+   kept in the web copy's own YUV and labelled with the colours browsers
+   show the video in, so the two match. Measured: 1.3 to 1.5 s for a 1080p
+   picture, a quarter of a second for 480p; 50 to 265 KB at 1080p, 6 to
+   22 KB at 480p. Made after every web copy;
+   stills of a folder are committed to its manifest together, at most
+   every 2 s. A folder built before stills existed gets them at the next
+   start, from the web copies it has; nothing else is made again. While a
+   video has no still, the views show its poster, as before.
+
+Steps 2 to 5 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
 working threads, `CPU_BUDGET` (the CPU count): a photo build is one unit
 (one single-threaded vips), a preview clip job 3 (its decoder thread,
@@ -323,11 +342,11 @@ up to 6 hours, 8 times;
 one that failed because of the file waits for a rescan or a new file.
 
 What the page gets: the manifest (`gg/_manifest.json`) has
-`videos: { "<name>": { duration, web, hasAudio, width, height, loops, storyboard } }`
+`videos: { "<name>": { duration, web, hasAudio, width, height, loops, storyboard, firstFrame } }`
 for every video ffmpeg can read, animated GIFs included (`web` is the web
 copy's file name in `gg/`, or null until it is made; `width` and `height`
 are the displayed size; `loops` is true for an animated GIF; `storyboard`
-is described below, or null) and
+is described below, or null; `firstFrame` is step 5's still, or null) and
 `videoAtlasDir` (`video_<id>`, or null while there is no atlas). The folder
 page sets `videos` and `videoAtlas` (the `_video.json` contents plus `dir`)
 next to `spriteMeta`. The build-status poll (`?build-status`) keeps its
@@ -347,7 +366,7 @@ more than one frame is also a video: when its folder is built, ffprobe
 (with the GIF reader only, so a file named `.gif` that is something else
 is not read as a video) gives its size and the delay of every frame, and
 the folder's video record (`_videos.json`) keeps the answer. From then on
-it gets everything a video gets, steps 2 to 4 above: preview clips, a
+it gets everything a video gets, steps 2 to 5 above: preview clips, a
 moving tile in the grid and the film strip, the silent preview in the
 photo view, and a web copy for the player. "Download original" is the
 GIF. A GIF of one frame stays a photo only, exactly as before.
