@@ -436,7 +436,8 @@ photos, shown by their first frame.
   of about 30 video tiles plays one h50 sheet.
 - **Opening a video** shows the web copy over the poster, in the box a
   photo would fill, with the viewer's own controls (no browser controls):
-  play/pause, a seek bar with the buffered ranges, time and duration,
+  play/pause, a seek bar showing how far the video is buffered from the
+  playhead, time and duration,
   mute and volume, full screen, and a "Download original" link. It plays
   with sound if the browser lets the page start it (otherwise it waits for
   a click), not by itself under `prefers-reduced-motion`. When the video

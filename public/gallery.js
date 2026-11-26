@@ -4112,6 +4112,7 @@
   // keyframe, so the video keeps up with all but a fast drag.
   var CONTROLS_IDLE_MS = 2500;      // controls fade after this long without a pointer or key while playing
   var SEEK_STEP_SECONDS = 5;        // arrow keys on the seek bar, and in fullscreen
+  var BUFFERED_REACH_SECONDS = 0.5;  // a buffered range starting this soon after the playhead is the playhead's (showBuffered)
   var END_OF_VIDEO_SECONDS = 0.25;  // a drag released this near the end leaves the video there
   var LANDED_PICTURE_WAIT_MS = 200; // the longest wait to play after a drag (playOnceShown)
   var PREVIEW_GRACE_MS = 100;       // a video this late landing on a stop gets the preview (showPreviewIfBehind)
@@ -4236,21 +4237,36 @@
     // for only some of it: none once a download has stopped. So the ranges
     // are read again on every event that may follow a change, and drawn
     // again only when they differ from those drawn (in tenths of seconds).
+    //
+    // Only the range the playhead is in is drawn: what is ready to play
+    // from here. Chrome reports the others in the wrong place for a video
+    // whose bitrate varies: it places downloaded bytes on the bar as if
+    // bytes were spread evenly over the duration, so after a seek in a 2 h
+    // film the data being loaded at the playhead showed as a block three
+    // minutes ahead of it, with a gap between (measured: a seek to 3632 s,
+    // whose bytes are 48.6% into the file, gave ranges 3632-3634 and
+    // 3841-3858; 48.6% of the duration is 3839 s). The range at the
+    // playhead is where the two agree.
     var drawnBuffered = '';
+    function bufferedAtPlayhead() {
+      for (var i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= video.currentTime + BUFFERED_REACH_SECONDS && video.buffered.end(i) > video.currentTime) {
+          return { start: video.buffered.start(i), end: video.buffered.end(i) };
+        }
+      }
+      return null;
+    }
     function showBuffered() {
       var total = duration();
-      var ranges = [];
-      for (var r = 0; r < video.buffered.length; r++) ranges.push(video.buffered.start(r).toFixed(1) + '-' + video.buffered.end(r).toFixed(1));
-      var now = total.toFixed(1) + ':' + ranges.join(',');
+      var ready = bufferedAtPlayhead();
+      var now = total.toFixed(1) + ':' + (ready ? ready.start.toFixed(1) + '-' + ready.end.toFixed(1) : '');
       if (now === drawnBuffered) return;
       drawnBuffered = now;
       buffered.textContent = '';
-      if (!total) return;
-      for (var i = 0; i < video.buffered.length; i++) {
-        var range = playerElement('span', 'player-buffered-range', buffered);
-        range.style.left = (fraction(video.buffered.start(i)) * 100) + '%';
-        range.style.width = ((fraction(video.buffered.end(i)) - fraction(video.buffered.start(i))) * 100) + '%';
-      }
+      if (!total || !ready) return;
+      var range = playerElement('span', 'player-buffered-range', buffered);
+      range.style.left = (fraction(ready.start) * 100) + '%';
+      range.style.width = ((fraction(ready.end) - fraction(ready.start)) * 100) + '%';
     }
     function showPlaying() {
       var playing = !video.paused;
