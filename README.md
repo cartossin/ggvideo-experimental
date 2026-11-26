@@ -259,13 +259,18 @@ What the server makes for each video, in this order:
 4. **Storyboard.** For the player's seek bar: frames across the whole
    video, 160 px tall, one a second up to 1,000 frames (then one every
    2, 3, ... s; a 2 h film gets one every 8 s, 987 frames), packed 10 x 10
-   in AVIF sheets `gg/<name>.sb<k>.avif`, listed in the manifest as
-   `storyboard: { interval, count, width, height, columns, rows, sheets }`
+   in AVIF sheets `gg/<name>.sb<k>.avif`, with each frame's exact time in
+   the web copy in `gg/<name>.sb.json`, listed in the manifest as
+   `storyboard: { interval, count, width, height, columns, rows, sheets, times }`
    (the exact contract is at the top of `lib/storyboard.js`). Made from
    the web copy after every web copy, by decoding only its keyframes
-   (every web copy of a video over a minute has one each second): the 2 h
-   film (from its present 8 GB copy) in 80 s and 2.9 MB, a 12 min 720p
-   film in 29 s and 4.0 MB. Videos under 30 s get none.
+   (every web copy of a video over a minute has one each second): each
+   frame is the first keyframe at or after a multiple of the interval,
+   so the seek bar can stop on it and a seek there decodes one frame.
+   The 2 h film (from its present 8 GB copy) in 80 s and 2.9 MB, a 12 min
+   720p film in 29 s and 4.0 MB. Videos from 30 s to a minute are decoded
+   whole (their copy may keep keyframes far apart), and their frames are
+   the first at or after each second. Videos under 30 s get none.
 
 Steps 2 to 4 run after the folder's build is committed, in a queue of
 their own, at nice 10. Everything the server builds shares one budget of
