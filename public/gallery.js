@@ -4095,11 +4095,12 @@
   // With a storyboard, the pointer on the bar lands on the nearest of its
   // frames' times (its stops, see fetchStoryboardTimes): hovering shows
   // that frame and its time above the stop; dragging moves the playhead
-  // from stop to stop and shows the stop's frame at once over the whole
-  // picture, scaled up, until the video has decoded the same picture
-  // itself; releasing (or clicking) plays from exactly that picture. That
-  // is what makes seeking feel instant before the decoder catches up, and
-  // the picture seen is the picture played. Without a storyboard (a video
+  // from stop to stop, the video's own picture following it, and when the
+  // video falls behind (showPreviewIfBehind) the stop's frame goes over
+  // the whole picture, scaled up, until the video has decoded the same
+  // picture itself; releasing (or clicking) plays from exactly the stop's
+  // picture. That is what makes seeking feel instant before the decoder
+  // catches up, and the picture seen is the picture played. Without a storyboard (a video
   // under 30 s, or its times not come yet) the bar is free and the video's
   // own frames follow it. The arrow keys seek by time, not by stop.
   //
@@ -4113,6 +4114,7 @@
   var SEEK_STEP_SECONDS = 5;        // arrow keys on the seek bar, and in fullscreen
   var END_OF_VIDEO_SECONDS = 0.25;  // a drag released this near the end leaves the video there
   var LANDED_PICTURE_WAIT_MS = 200; // the longest wait to play after a drag (playOnceShown)
+  var PREVIEW_GRACE_MS = 100;       // a video this late landing on a stop gets the preview (showPreviewIfBehind)
   var FREE_POSITION_FRAME_SECONDS = 0.25;  // a frame this long or shorter holds a free position (isPictureOfTarget)
   // Every seek goes this far past the time asked for. A stop's time is
   // rounded to the microsecond, so it can be a hair before its frame's
@@ -4184,15 +4186,17 @@
     // target: the position wanted last; seekWanted: a seek to it waits for
     // the one in flight; seekPending: the video has not got there yet.
     // issued: the last seek given to the video; taken: the video began it
-    // ('seeking' came); playOnArrival: play once the seek pending lands;
+    // ('seeking' came); landing: the target's landingAt (for its preview);
+    // playOnArrival: play once the seek pending lands;
     // waits: counts the waits for a landed picture (playOnceShown), so an
     // older one's callback does nothing; shownSeconds: the time of the
     // picture presented after the last seek landed (notePresentedPicture).
     var storyboard = createStoryboardLoader(name);
     var pointerFrame = null;   // { clientX, pointerType } waiting for the next animation frame
     var pointerFrameRequest = null;
+    var previewTimer = null;   // the grace before the preview (showPreviewIfBehind)
     var scrub = { active: false, target: 0, wasPlaying: false, seekWanted: false, seekPending: false,
-      issued: null, taken: false, playOnArrival: false, waits: 0, shownSeconds: null };
+      issued: null, taken: false, playOnArrival: false, waits: 0, shownSeconds: null, landing: null };
     var shownFrames = { hover: null, preview: null };   // storyboard frame indexes painted last (test hook)
     var idleTimer = null;
     var lastPointerType = 'mouse';
@@ -4324,8 +4328,11 @@
       // The decoded frame is for the latest position, the picture the
       // preview showed: it replaces the preview. A seek to an older
       // position never does: it was followed by another (seekWanted).
+      trace('landed', scrub.target, null);
       if (!preview.hidden) trace('real', scrub.target, video.currentTime);
       preview.hidden = true;
+      clearTimeout(previewTimer);
+      previewTimer = null;
       notePresentedPicture();
       if (scrub.playOnArrival) playOnceShown();
       showPosition();
@@ -4397,8 +4404,9 @@
     }
 
     // Test hook: with window.__playerTrace an array, every pointer move,
-    // every painted storyboard frame and what resumed playing after a drag
-    // (play-shown, play-waited) are logged (time, position, frame).
+    // every painted storyboard frame, every seek landed on the wanted
+    // position, and what resumed playing after a drag (play-shown,
+    // play-waited) are logged (time, position, frame).
     function trace(kind, seconds, frameIndex) {
       if (!Array.isArray(window.__playerTrace)) return;
       window.__playerTrace.push({ kind: kind, at: performance.now(), seconds: seconds,
@@ -4421,10 +4429,31 @@
     }
     function scrubTo(landing) {
       scrub.target = landing.seconds;
-      showScrubPreview(landing);
+      scrub.landing = landing;
       showHover(landing);
       issueSeek();
+      showPreviewIfBehind(landing);
       showPosition();
+    }
+    // The storyboard frame goes over the picture only while the video is
+    // behind: its seek to the wanted stop has not landed PREVIEW_GRACE_MS
+    // after the pointer left the stop the video is at. A seek to a
+    // keyframe stop of a buffered copy takes 1 to 30 ms (measured, with
+    // the preview then showing 3 to 32 ms a stop); a soft frame put over
+    // the picture for that moment and then swapped for the sharp one is a
+    // flicker at every stop of a slow drag. So a video keeping up goes
+    // sharp picture to sharp picture with nothing over it, and a video
+    // that is behind (a fast drag, a slow link, keyframes far apart) gets
+    // the preview 100 ms on, six frames, and from then on at every move
+    // until it lands (onSeeked hides it, and the grace starts again).
+    function showPreviewIfBehind(landing) {
+      if (!scrub.seekPending) return;
+      if (!preview.hidden) { showScrubPreview(landing); return; }
+      if (previewTimer !== null) return;
+      previewTimer = setTimeout(function () {
+        previewTimer = null;
+        if (scrub.seekPending) showScrubPreview(scrub.landing);
+      }, PREVIEW_GRACE_MS);
     }
     // Pointer moves come faster than frames: the latest is applied once
     // per animation frame (the position, the preview, the bubble, the
@@ -4449,9 +4478,11 @@
       if (!scrub.active) return;
       if (pointerFrameRequest !== null) { cancelAnimationFrame(pointerFrameRequest); pointerFrameRequest = null; pointerFrame = null; }
       scrub.active = false;
-      scrub.target = landingAt(e.clientX).seconds;
+      scrub.landing = landingAt(e.clientX);
+      scrub.target = scrub.landing.seconds;
       if (e.pointerType !== 'mouse') hover.hidden = true;
       issueSeek();
+      showPreviewIfBehind(scrub.landing);
       // Playing again after the drag, unless it was released at the very
       // end: play() on an ended video starts it again from the beginning.
       scrub.playOnArrival = scrub.wasPlaying && scrub.target < duration() - END_OF_VIDEO_SECONDS;
@@ -4611,6 +4642,7 @@
       },
       destroy: function () {
         scrub.playOnArrival = false;
+        clearTimeout(previewTimer);
         if (idleTimer) clearTimeout(idleTimer);
         if (pointerFrameRequest !== null) cancelAnimationFrame(pointerFrameRequest);
         if (storyboard) storyboard.destroy();

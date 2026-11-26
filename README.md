@@ -443,9 +443,11 @@ photos, shown by their first frame.
   has a storyboard (frames sampled over the whole video in sprite sheets,
   keyframes of the web copy for videos over a minute), the seek bar stops
   only on its frames' times: hovering shows the nearest frame and its
-  time, dragging moves from frame to frame and shows each over the
-  picture at once, until the video has decoded the same picture (it
-  seeks while dragging, one seek at a time), and releasing or clicking
+  time, dragging moves from frame to frame (it seeks while dragging, one
+  seek at a time), the video's own picture following; only when the
+  video falls behind by more than 0.1 s (a fast drag, a slow link) is the
+  frame put over the picture, following the pointer, until the video has
+  decoded the same picture; and releasing or clicking
   plays from exactly the frame shown. Without one (videos under 30 s) the
   bar is free and the video's own frames follow it. The arrows seek by
   time, not by frame. The controls
