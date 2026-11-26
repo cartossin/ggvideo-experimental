@@ -225,7 +225,7 @@
   function reloadIsAwaited() { return waitingForFirstBuild || buildReplaced || trashAwaitsBuild(); }
 
   // The folder's video work (the answer's video object: preview clips,
-  // mosaic sheets, web copies, storyboards) goes on long after its photos are built,
+  // mosaic sheets, web copies, storyboards, first-frame stills) goes on long after its photos are built,
   // hours for thousands of videos. What is left of it, '' when nothing is.
   var VIDEO_WORK_POLL_MS = 10000;
   var videoWorkSeen = false;       // an answer of this page said video work was running
@@ -236,6 +236,7 @@
     if (video.sheetsRemaining > 0) left.push(video.sheetsRemaining + ' mosaic sheet' + (video.sheetsRemaining === 1 ? '' : 's'));
     if (video.webRemaining > 0) left.push(video.webRemaining + ' playable cop' + (video.webRemaining === 1 ? 'y' : 'ies'));
     if (video.storyboardsRemaining > 0) left.push(video.storyboardsRemaining + ' storyboard' + (video.storyboardsRemaining === 1 ? '' : 's'));
+    if (video.firstFramesRemaining > 0) left.push(video.firstFramesRemaining + ' first-frame still' + (video.firstFramesRemaining === 1 ? '' : 's'));
     return left.length ? 'Preparing videos: ' + left.join(', ') + ' to go' : 'Preparing videos…';
   }
   // A request that gets no answer (network down, server restarting, an HTTP
@@ -656,7 +657,7 @@
     if (lv.h === 'focus') {
       var name = findCenteredImageName();
       if (name == null && images[1]) name = images[1];
-      if (name) location.hash = encodeURIComponent(name);
+      if (name) openPhotoViewFromGrid(name);
       return;
     }
     lastGridLevelIdx = idx;
@@ -1952,7 +1953,7 @@
     while (i < n && lastTileRects[i].y === rowY) {
       var t = lastTileRects[i];
       if (cx >= t.x && cx < t.x + t.w && cy >= t.y && cy < t.y + t.h) {
-        location.hash = encodeURIComponent(t.name);
+        openPhotoViewFromGrid(t.name);
         return;
       }
       i++;
@@ -3687,8 +3688,11 @@
     var targetH = g.dh * devicePixelRatio();
     var tier = pickPerImageTier(targetH);
 
-    // Best already-resolved source (target tier → smaller cached tier → atlas).
-    var src = getBestSrcForFocus(focusedIdx, targetH);
+    // Best already-resolved source (target tier → smaller cached tier →
+    // atlas), or for a video its first-frame still and nothing else: every
+    // other picture of it is its poster, a later frame (see firstFrameOf).
+    var showsFirstFrame = !!firstFrameOf(images[focusedIdx]);
+    var src = showsFirstFrame ? firstFrameSrcSync(images[focusedIdx]) : getBestSrcForFocus(focusedIdx, targetH);
     if (src) {
       mainDrawSrc = { bitmap: src.bitmap, sx: src.sx, sy: src.sy, sw: src.sw, sh: src.sh, forIdx: focusedIdx };
     } else if (mainDrawSrc && mainDrawSrc.forIdx !== focusedIdx) {
@@ -3704,12 +3708,16 @@
     // by prefetchFilmstripVisible's stable-focus timer; nothing to do here.
     var capturedIdx = focusedIdx;
 
+    // A video's still not decoded yet: black until it is (the stable-focus
+    // prefetch below has usually decoded it already, as a neighbour).
+    if (showsFirstFrame && !src) paintFirstFrameWhenLoaded(capturedIdx);
+
     // No per-image bitmap yet (nothing, or only the h50 atlas cell). If the
     // grid already holds this image as a texture at a smaller tier, its
     // bitmap was closed at upload — re-decoding that file from the HTTP
     // cache takes a few ms and gives a far sharper placeholder than the
     // atlas while the ideal tier downloads.
-    if (!src || src.tier === 0) {
+    if (!showsFirstFrame && (!src || src.tier === 0)) {
       var cachedTier = bestTexturedPerImageTier(images[capturedIdx]);
       if (cachedTier) {
         loadPerImageBitmap(images[capturedIdx], cachedTier).then(function (bm) {
@@ -3724,7 +3732,7 @@
     // instant OUR sprite arrives — rather than waiting for every sprite in the
     // atlas to decode. With OI's 32 h50 sprites that turns ~1s of black canvas
     // into <100ms.
-    if (!src) {
+    if (!showsFirstFrame && !src) {
       var atlasH = 50;
       var atlas = spriteMeta.atlases && spriteMeta.atlases[String(atlasH)];
       if (atlas) {
@@ -3776,6 +3784,7 @@
     cancelPerImageLoadsExcept(keepKeys);
     warmPerImageNames = warmNames;
     evictPerImage(warmNames);
+    keepFirstFrames(warmNames);
 
     // Restart the stable-focus timer. While the user is actively scrubbing,
     // each focusedIdx change resets this; nothing is fetched. When the user
@@ -3787,22 +3796,151 @@
       if (focusedIdx !== capturedIdx) return;
       var centerName = images[capturedIdx];
       if (!centerName) return;
-      loadPerImageBitmap(centerName, tier).then(function (bm) {
+      // A video with a first-frame still: that, not its poster's tiers.
+      var centerLoad = firstFrameOf(centerName)
+        ? paintFirstFrameWhenLoaded(capturedIdx)
+        : loadPerImageBitmap(centerName, tier).then(function (bm) {
+          if (focusedIdx !== capturedIdx) return;
+          if (bm && mainEl) {
+            mainDrawSrc = { bitmap: bm, sx: 0, sy: 0, sw: bm.width, sh: bm.height, forIdx: capturedIdx };
+            paintMain();
+          }
+        });
+      centerLoad.then(function () {
         if (focusedIdx !== capturedIdx) return;
-        if (bm && mainEl) {
-          mainDrawSrc = { bitmap: bm, sx: 0, sy: 0, sw: bm.width, sh: bm.height, forIdx: capturedIdx };
-          paintMain();
-        }
         // Fan out to neighbors only after center has resolved. They're fire-
         // and-forget; cancellation handles them if focusedIdx moves again.
         for (var dk = 1; dk <= R; dk++) {
           var prev = capturedIdx - dk;
           var next = capturedIdx + dk;
-          if (prev >= 1 && images[prev]) loadPerImageBitmap(images[prev], tier);
-          if (next <= lastimagevalue && images[next]) loadPerImageBitmap(images[next], tier);
+          if (prev >= 1 && images[prev]) prefetchMainPicture(images[prev], tier);
+          if (next <= lastimagevalue && images[next]) prefetchMainPicture(images[next], tier);
         }
       });
     }, FOCUS_STABLE_MS);
+  }
+
+  // What the photo view will paint for a neighbour of the focused item: a
+  // video's first-frame still, or a photo's (or a video's poster) tier.
+  function prefetchMainPicture(name, tier) {
+    if (firstFrameOf(name)) loadFirstFrameBitmap(name);
+    else loadPerImageBitmap(name, tier);
+  }
+
+  // ---- first-frame stills ------------------------------------------------
+  // A video's first picture (lib/first_frame.js, manifest
+  // videos[name].firstFrame): what the photo view's canvas paints and the
+  // element shows as its poster, in the photo view and the player view,
+  // until the video has a frame of its own. Exactly the picture the video
+  // then starts from. Not its poster: that is a later frame, chosen to
+  // stand for the video in the grid (which keeps it), and shown large and
+  // then replaced by the video starting from 0 it gave away a moment of
+  // the video before it played. A video with no still (made before there
+  // were stills, still being made, or one that could not be loaded) shows
+  // its poster, as before.
+  //
+  // Decoded stills are kept for the photo view's neighbours, like the
+  // photos' tiers (keepFirstFrames), so Left and Right find them ready.
+  var firstFrameBitmaps = new Map();  // video name -> ImageBitmap
+  var firstFrameLoads = new Map();    // video name -> { promise, ctrl } while fetched and decoded
+  var firstFramesFailed = new Set();  // stills that could not be loaded: their videos show the poster
+
+  function firstFrameOf(name) {
+    if (!isVideoName(name) || firstFramesFailed.has(name)) return null;
+    var info = window.videos[name];
+    return info.web && info.firstFrame ? info.firstFrame : null;
+  }
+  // With the version in the URL the server lets the still be kept for good.
+  function firstFrameURL(still) {
+    return folderURL + GG_DIR + '/' + encodeURIComponent(still.file) + '?v=' + encodeURIComponent(still.version);
+  }
+  function firstFrameSrcSync(name) {
+    var bm = firstFrameBitmaps.get(name);
+    return bm ? { bitmap: bm, sx: 0, sy: 0, sw: bm.width, sh: bm.height } : null;
+  }
+
+  // Resolves with the decoded still, or null when it was not wanted any
+  // more or could not be loaded (then the video shows its poster).
+  function loadFirstFrameBitmap(name) {
+    var ready = firstFrameBitmaps.get(name);
+    if (ready) return Promise.resolve(ready);
+    var loading = firstFrameLoads.get(name);
+    if (loading) return loading.promise;
+    var still = firstFrameOf(name);
+    if (!still) return Promise.resolve(null);
+    var url = firstFrameURL(still);
+    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var options = { credentials: 'same-origin', priority: 'high' };
+    if (ctrl) options.signal = ctrl.signal;
+    var promise = withRetries(function () {
+      return fetchFromBuild(url, options)
+        .then(function (r) { return r.blob(); })
+        .then(function (b) { return ctrl && ctrl.signal.aborted ? null : createImageBitmap(b); });
+    }, ctrl && ctrl.signal)
+      .catch(function () {
+        firstFramesFailed.add(name);
+        return null;
+      })
+      .then(function (bm) {
+        firstFrameLoads.delete(name);
+        if (bm && ctrl && ctrl.signal.aborted) { closeBitmap(bm); bm = null; }
+        if (bm) firstFrameBitmaps.set(name, bm);
+        return bm;
+      });
+    firstFrameLoads.set(name, { promise: promise, ctrl: ctrl });
+    return promise;
+  }
+
+  // Paint the focused video's still once decoded (if it is still focused).
+  // A still that could not be loaded: the view is drawn again, with the
+  // poster. Resolves when done.
+  function paintFirstFrameWhenLoaded(idx1) {
+    var name = images[idx1];
+    return loadFirstFrameBitmap(name).then(function (bm) {
+      if (!mainEl || focusedIdx !== idx1) return;
+      if (!bm) {
+        if (firstFramesFailed.has(name)) drawMainImage();
+        return;
+      }
+      if (mainDrawSrc && mainDrawSrc.forIdx === idx1 && mainDrawSrc.bitmap === bm) return;
+      mainDrawSrc = { bitmap: bm, sx: 0, sy: 0, sw: bm.width, sh: bm.height, forIdx: idx1 };
+      paintMain();
+    });
+  }
+
+  // Keep the stills of these names; free the others (never the one the main
+  // canvas is painting: paintMain may run again before it is replaced).
+  function keepFirstFrames(names) {
+    var pinned = (mainDrawSrc && mainDrawSrc.bitmap) || null;
+    firstFrameLoads.forEach(function (loading, name) {
+      if (!names.has(name) && loading.ctrl) loading.ctrl.abort();
+    });
+    firstFrameBitmaps.forEach(function (bm, name) {
+      if (names.has(name) || bm === pinned) return;
+      closeBitmap(bm);
+      firstFrameBitmaps.delete(name);
+    });
+  }
+
+  // The grid (a click on a tile, or the zoom control) opens the photo view
+  // of an item. For a video with a still, once the still is decoded, or
+  // after FIRST_FRAME_WAIT_MS at most: until then the grid stays, rather
+  // than the photo view showing a black box where the picture will be.
+  var FIRST_FRAME_WAIT_MS = 1000;
+  var photoViewOpening = null;  // { name } while the grid waits for a still
+  function openPhotoViewFromGrid(name) {
+    var opening = { name: name };
+    photoViewOpening = opening;
+    function open() {
+      if (photoViewOpening !== opening) return;
+      photoViewOpening = null;
+      // The visitor has gone elsewhere meanwhile (Back, a link).
+      if (focusedIdx !== 0 || playerViewShown()) return;
+      location.hash = encodeURIComponent(name);
+    }
+    if (!firstFrameOf(name) || firstFrameBitmaps.has(name)) { open(); return; }
+    loadFirstFrameBitmap(name).then(open);
+    setTimeout(open, FIRST_FRAME_WAIT_MS);
   }
 
   // Best already-cached source for `idx1` at `targetH`: walk per-image tiers
@@ -4674,8 +4812,9 @@
   // looping its first PREVIEW_LOOP_SECONDS, with a play button in the
   // middle that opens the player view (openPlayer), where our controls
   // are. It is laid over the main canvas in the box a photo of its shape
-  // fills. The canvas paints the poster under it as it does for a photo,
-  // and the element shows the same poster until it has a frame. The
+  // fills. The canvas paints the video's first-frame still under it (or,
+  // while it has none, its poster, as for a photo), and the element shows
+  // the same picture until it has a frame. The
   // element is made only once the view has settled on the video, so a
   // film strip moving past videos does not load each one. While a video
   // has no web copy yet, the poster stays with a note, and the
@@ -4760,7 +4899,7 @@
     // items does not download each one ahead.
     element.preload = 'metadata';
     var g = mainImageGeom();
-    element.poster = posterURLFor(name, g ? g.dh * devicePixelRatio() : CANONICAL_H);
+    element.poster = videoPosterURL(name, g ? g.dh * devicePixelRatio() : CANONICAL_H);
     box.appendChild(element);
     var playButton = playerElement('button', 'main-video-play', box);
     playButton.type = 'button';
@@ -4834,7 +4973,7 @@
     // An animated GIF plays round and round, as the GIF itself does in a
     // browser; a video plays once.
     element.loop = isVideoName(name) && !!window.videos[name].loops;
-    element.poster = posterURLFor(name, playerPictureHeight(name) * devicePixelRatio());
+    element.poster = videoPosterURL(name, playerPictureHeight(name) * devicePixelRatio());
     var controls = createVideoControls(element, name);
     var view = playerElement('div', 'player-view');
     view.tabIndex = -1;
@@ -4908,6 +5047,14 @@
     }
     try { history.replaceState(null, '', '#' + encodeURIComponent(name)); } catch (_) {}
     refreshfromhash();
+  }
+
+  // What the element shows until the video has a frame: its first-frame
+  // still (the picture the main canvas paints under it, already in the HTTP
+  // cache), or while it has none its poster.
+  function videoPosterURL(name, deviceHeight) {
+    var still = firstFrameOf(name);
+    return still ? firstFrameURL(still) : posterURLFor(name, deviceHeight);
   }
 
   // The poster as the photo view would fetch it: the per-photo tier for
@@ -5310,6 +5457,7 @@
   function showGridView(levelIdx) {
     teardownPhotoView();
     stopMainVideo();
+    keepFirstFrames(new Set());
     currentLevelIdx = levelIdx;
     lastGridLevelIdx = levelIdx;
     var lv = availableLevels()[levelIdx];
